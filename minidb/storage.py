@@ -8,6 +8,10 @@
       마지막 "줄"이 아니라 마지막 "CSV 행" 기준 (s5, s5b)
 - B15 파일이 없으면 SqlError (만들지 않음)
 - B19 인코딩은 보류. 지금은 utf-8
+- Phase 2 id 인덱스: 메모리 B+ 트리에 id → 행이 시작하는 바이트 위치.
+      id로 처음 찾을 때만 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고,
+      트리가 이미 있을 때만 쓴 행을 바로 등록한다 (s7).
+      id로 찾을 때는 그 위치로 가서 행 하나만 읽는다
 
 담당: (이름)
 """
@@ -15,9 +19,10 @@
 import csv
 from collections.abc import Iterator
 from contextlib import contextmanager
-from io import SEEK_END, TextIOWrapper
+from io import SEEK_END, BufferedRandom, BufferedReader, StringIO
 from pathlib import Path
 
+from minidb.bptree import BPlusTree
 from minidb.errors import SqlError
 from minidb.schema import Schema, parse_header
 
@@ -37,34 +42,56 @@ class Table:
         self.name = name
         self.path = path
         self.schema = schema
-        self._append_file: TextIOWrapper | None = None
+        self._append_file: BufferedRandom | None = None
+        self._end_offset = 0
         self._next_id: int | None = None
+        self._index: BPlusTree | None = None
 
     def read_rows(self) -> list[Row]:
         """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다."""
         with _open_records(self.path) as records:
-            if self._append_file is not None:
-                self._append_file.flush()
+            self._flush()
             next(records, None)
             return [
-                self._decode_row(fields, number)
+                self._decode_row(fields, f"data row {number}")
                 for number, fields in enumerate(records, start=1)
             ]
 
+    def find_row_by_id(self, row_id: int) -> Row | None:
+        """B+ 트리로 위치를 찾아 그 행 하나만 읽는다. 없으면 None.
+
+        트리가 없으면 이때 파일을 한 번 훑어 만든다. 파일에 같은 id가
+        두 번 있으면 SqlError.
+        """
+        self._flush()
+        offset = self._load_index().find(row_id)
+        if offset is None:
+            return None
+        with _open_binary(self.path) as file:
+            file.seek(offset)
+            fields = _parse_record(_read_record(file), self.path)
+        return self._decode_row(fields, f"row with id {row_id}")
+
     def append_rows(self, rows: list[Row]) -> None:
-        """검사가 끝난 행(id 포함, 스키마 순서)을 버퍼에 쓴다."""
+        """검사가 끝난 행(id 포함, 스키마 순서)을 버퍼에 쓴다.
+
+        트리가 이미 있으면 쓴 행을 트리에도 등록한다. 그 id가 트리에
+        이미 있으면 아무것도 쓰지 않고 SqlError.
+        """
         if not rows:
             return
         next_id = self.find_next_id()
-        try:
-            if self._append_file is None:
-                self._append_file = _open_append_file(self.path)
-            csv.writer(self._append_file).writerows(rows)
-        except FileNotFoundError as error:
-            raise SqlError(f"table {self.name} does not exist") from error
-        except (OSError, UnicodeError, csv.Error) as error:
-            raise SqlError(f"cannot write rows to {self.path.name}") from error
+        row_ids = [row[self._id_index] for row in rows]
+        self._check_new_ids(row_ids)
+        encoded_rows = [_encode_row(row, self.path) for row in rows]
+
+        offset = self._write(b"".join(encoded_rows))
         self._next_id = next_id + len(rows)
+        if self._index is None:
+            return
+        for row_id, encoded in zip(row_ids, encoded_rows):
+            self._index.insert(row_id, offset)
+            offset += len(encoded)
 
     def find_next_id(self) -> int:
         """다음에 쓸 id. append_rows로 쓴 행만큼 늘어난다."""
@@ -83,8 +110,22 @@ class Table:
         except OSError as error:
             raise SqlError(f"cannot close {self.path.name}") from error
 
-    def _decode_row(self, fields: list[str], number: int) -> Row:
-        location = f"{self.path.name} data row {number}"
+    @property
+    def _id_index(self) -> int:
+        id_index = self.schema.find("id")
+        assert id_index is not None
+        return id_index
+
+    def _flush(self) -> None:
+        if self._append_file is None:
+            return
+        try:
+            self._append_file.flush()
+        except OSError as error:
+            raise SqlError(f"cannot write rows to {self.path.name}") from error
+
+    def _decode_row(self, fields: list[str], where: str) -> Row:
+        location = f"{self.path.name} {where}"
         if len(fields) != len(self.schema.columns):
             raise SqlError(
                 f"{location}: expected {len(self.schema.columns)} values "
@@ -109,14 +150,69 @@ class Table:
         if last_fields is None:
             return 1
 
-        id_index = self.schema.find("id")
-        assert id_index is not None
         try:
-            return int(last_fields[id_index]) + 1
+            return int(last_fields[self._id_index]) + 1
         except (IndexError, ValueError) as error:
             raise SqlError(
                 f"{self.path.name} last row has an invalid id"
             ) from error
+
+    def _load_index(self) -> BPlusTree:
+        """처음 한 번 파일을 훑어 id → 바이트 위치 트리를 만든다."""
+        if self._index is not None:
+            return self._index
+        index = BPlusTree()
+        last_id = None
+        for number, (offset, fields) in enumerate(
+            _scan_records(self.path), start=1,
+        ):
+            last_id = self._read_row_id(fields, number)
+            self._register_id(index, last_id, offset)
+        self._index = index
+        # 다음 id(B13)를 아직 몰랐다면 같은 훑기에서 얻은 값을 쓴다.
+        if self._next_id is None:
+            self._next_id = 1 if last_id is None else last_id + 1
+        return index
+
+    def _read_row_id(self, fields: list[str], number: int) -> int:
+        try:
+            return int(fields[self._id_index])
+        except (IndexError, ValueError) as error:
+            raise SqlError(
+                f"{self.path.name} data row {number} has an invalid id"
+            ) from error
+
+    def _register_id(self, index: BPlusTree, row_id: int,
+                     offset: int) -> None:
+        try:
+            index.insert(row_id, offset)
+        except ValueError as error:
+            raise SqlError(
+                f"{self.path.name} has duplicate id {row_id}"
+            ) from error
+
+    def _check_new_ids(self, row_ids: list[int]) -> None:
+        # 트리가 없으면 확인할 방법이 없다. 그때는 B13대로 믿고 쓴다.
+        if self._index is None:
+            return
+        for row_id in row_ids:
+            if self._index.has_key(row_id):
+                raise SqlError(f"id {row_id} already exists in {self.name}")
+
+    def _write(self, data: bytes) -> int:
+        """data를 파일 끝에 쓰고, data가 시작한 바이트 위치를 돌려준다."""
+        try:
+            if self._append_file is None:
+                self._append_file = _open_append_file(self.path)
+                self._end_offset = self._append_file.tell()
+            self._append_file.write(data)
+        except FileNotFoundError as error:
+            raise SqlError(f"table {self.name} does not exist") from error
+        except OSError as error:
+            raise SqlError(f"cannot write rows to {self.path.name}") from error
+        start = self._end_offset
+        self._end_offset += len(data)
+        return start
 
 
 def open_table(name: str) -> Table:
@@ -135,6 +231,7 @@ def open_table(name: str) -> Table:
 # ---------------------------------------------------------------------------
 
 _ENCODING = "utf-8"
+_QUOTE = ord('"')
 
 
 @contextmanager
@@ -148,7 +245,61 @@ def _open_records(path: Path) -> Iterator[Iterator[list[str]]]:
         raise SqlError(f"cannot read {path.name}") from error
 
 
-def _open_append_file(path: Path) -> TextIOWrapper:
+@contextmanager
+def _open_binary(path: Path) -> Iterator[BufferedReader]:
+    # 바이트 위치(seek/tell)를 쓰려고 바이너리로 연다. 글자 변환은 직접 한다.
+    try:
+        with path.open("rb") as file:
+            yield file
+    except FileNotFoundError as error:
+        raise SqlError(f"table {path.stem} does not exist") from error
+    except OSError as error:
+        raise SqlError(f"cannot read {path.name}") from error
+
+
+def _parse_record(record: bytes, path: Path) -> list[str]:
+    try:
+        text = record.decode(_ENCODING)
+        return next(csv.reader(StringIO(text, newline=""), strict=True), [])
+    except (UnicodeError, csv.Error) as error:
+        raise SqlError(f"cannot read {path.name}") from error
+
+
+def _read_record(file: BufferedReader) -> bytes:
+    """CSV 행 하나의 바이트. 따옴표 안의 줄바꿈이면 다음 줄까지 붙인다."""
+    record = file.readline()
+    quotes = record.count(_QUOTE)
+    while quotes % 2 == 1:
+        line = file.readline()
+        if not line:
+            break
+        record += line
+        quotes += line.count(_QUOTE)
+    return record
+
+
+def _scan_records(path: Path) -> Iterator[tuple[int, list[str]]]:
+    """헤더를 뺀 행마다 (시작 바이트 위치, 필드)."""
+    with _open_binary(path) as file:
+        _read_record(file)
+        while True:
+            offset = file.tell()
+            record = _read_record(file)
+            if not record:
+                return
+            yield offset, _parse_record(record, path)
+
+
+def _encode_row(row: Row, path: Path) -> bytes:
+    text = StringIO(newline="")
+    csv.writer(text).writerow(row)
+    try:
+        return text.getvalue().encode(_ENCODING)
+    except UnicodeError as error:
+        raise SqlError(f"cannot write rows to {path.name}") from error
+
+
+def _open_append_file(path: Path) -> BufferedRandom:
     file = path.open("r+b")
     try:
         if file.seek(0, SEEK_END):
@@ -156,7 +307,7 @@ def _open_append_file(path: Path) -> TextIOWrapper:
         # 마지막 레코드에 줄바꿈이 빠져 있으면 새 행과 구분한다.
         if file.read(1) not in (b"", b"\n", b"\r"):
             file.write(b"\n")
-        return TextIOWrapper(file, encoding=_ENCODING, newline="")
+        return file
     except OSError:
         file.close()
         raise
