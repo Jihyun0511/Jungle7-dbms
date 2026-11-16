@@ -179,15 +179,26 @@ def _select(table: Table, statement: Select) -> Result:
             schema.columns[where_index], statement.where.value,
         )
 
-    rows = [
-        tuple(row[index] for index in indices)
-        for row in table.read_rows()
-        if where_index is None or row[where_index] == where_value
-    ]
+    matched = _find_matching_rows(table, where_index, where_value)
+    rows = [tuple(row[index] for index in indices) for row in matched]
     return Result(
         kind="select", columns=[schema.columns[i].name for i in indices],
         rows=rows,
     )
+
+
+def _find_matching_rows(
+    table: Table, where_index: int | None, where_value: int | str | None,
+) -> list[Row]:
+    """WHERE id = ? 면 B+ 트리 인덱스, 다른 컬럼이면 선형 탐색 (Phase 2)."""
+    if where_index is None:
+        return table.read_rows()
+    if table.schema.columns[where_index].name == "id":
+        row = table.find_row_by_id(where_value)
+        return [] if row is None else [row]
+    return [
+        row for row in table.read_rows() if row[where_index] == where_value
+    ]
 
 
 def _find_column(schema: Schema, name: Name) -> int:
