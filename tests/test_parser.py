@@ -45,6 +45,7 @@ def test_p4_select_where():
 def test_p5_missing_last_semicolon_is_error():
     with pytest.raises(SqlError) as error:
         parse_script("SELECT * FROM users;\nSELECT * FROM users")
+    assert error.value.message == "expected ';' but got end of file"
     assert error.value.position == Position(2, 20)
     assert error.value.statement == 2
 
@@ -66,6 +67,7 @@ def test_p6_empty_statements_are_ignored():
 def test_p7_null_is_error(sql, position):
     with pytest.raises(SqlError) as error:
         parse_script(sql)
+    assert error.value.message == "NULL is not supported"
     assert error.value.position == position
 
 

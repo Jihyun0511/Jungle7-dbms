@@ -21,6 +21,10 @@ from minidb.schema import Column, Schema
 from minidb.statements import Insert, Name, Select, Statement, Value
 from minidb.storage import Row, Table, open_table
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 
 @dataclass
 class Result:
@@ -47,7 +51,9 @@ class Engine:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
         statements = parse_script(sql)
         if len(statements) != 1:
-            raise SqlError("SQL 문장이 정확히 하나 필요")
+            raise SqlError(
+                f"expected exactly one statement but got {len(statements)}"
+            )
         return self.run(statements[0])
 
     def run(self, statement: Statement) -> Result:
@@ -85,6 +91,11 @@ class Engine:
         return table
 
 
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+
 def _insert(table: Table, statement: Insert) -> Result:
     schema = table.schema
     column_indices = _insert_column_indices(schema, statement)
@@ -113,9 +124,14 @@ def _insert_column_indices(schema: Schema, statement: Insert) -> list[int]:
     seen_names = set()
     for name in statement.columns:
         if name.text == "id":
-            raise SqlError("id는 자동으로 부여하는 컬럼", name.position)
+            raise SqlError(
+                "id is assigned automatically and cannot be inserted",
+                name.position,
+            )
         if name.text in seen_names:
-            raise SqlError(f"컬럼 {name.text} 중복", name.position)
+            raise SqlError(
+                f"column {name.text} appears twice", name.position,
+            )
         indices.append(_find_column(schema, name))
         seen_names.add(name.text)
 
@@ -125,7 +141,10 @@ def _insert_column_indices(schema: Schema, statement: Insert) -> list[int]:
     ]
     if missing:
         names = ", ".join(missing)
-        raise SqlError(f"INSERT 컬럼 누락 ({names})", statement.table.position)
+        raise SqlError(
+            f"INSERT column list is missing {names}",
+            statement.table.position,
+        )
     return indices
 
 
@@ -135,7 +154,7 @@ def _check_insert_row(
     if len(values) != len(indices):
         position = values[0].position if values else table.position
         raise SqlError(
-            f"INSERT 값 개수 불일치 (필요 {len(indices)}개, 입력 {len(values)}개)",
+            f"expected {len(indices)} values but got {len(values)}",
             position,
         )
 
@@ -174,16 +193,21 @@ def _select(table: Table, statement: Select) -> Result:
 def _find_column(schema: Schema, name: Name) -> int:
     index = schema.find(name.text)
     if index is None:
-        raise SqlError(f"컬럼 {name.text}가 없음", name.position)
+        raise SqlError(f"column {name.text} does not exist", name.position)
     return index
 
 
 def _check_value(column: Column, value: Value) -> int | str:
     if type(value.value) is not column.type:
         expected = column.type.__name__
-        actual = type(value.value).__name__
         raise SqlError(
-            f"컬럼 {column.name}은 {expected} 타입, 입력값은 {actual} 타입",
+            f"{column.name} is {expected} but got {_describe(value)}",
             value.position,
         )
     return value.value
+
+
+def _describe(value: Value) -> str:
+    if isinstance(value.value, str):
+        return f"string '{value.value}'"
+    return f"integer {value.value}"

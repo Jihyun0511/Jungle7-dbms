@@ -1,4 +1,4 @@
-"""CLI 기능 테스트 (R-Q2). 노션 5절 c1~c9.
+"""CLI 기능 테스트 (R-Q2). 노션 5절 c1~c10.
 
 run_cli로 sql_processor.py를 진짜 프로세스로 실행하고 stdout, stderr, 종료 코드,
 실행 뒤 파일 내용을 확인한다. 에러 메시지는 포함 여부로 확인한다 (B22).
@@ -55,11 +55,15 @@ def test_c4_newline_value_on_one_line(tmp_path):
 @pytest.mark.parametrize(
     ("bad_statement", "location", "message"),
     [
-        ("INSERT INTO users VALUES ('kim', '20');", "2줄 34칸", "age"),
+        (
+            "INSERT INTO users VALUES ('kim', '20');",
+            "line 2, column 34",
+            "age is int but got string '20'",
+        ),
         (
             "INSERT INTO orders VALUES ('kim', 20);",
-            "2줄 13칸",
-            "테이블 orders가 없음",
+            "line 2, column 13",
+            "table orders does not exist",
         ),
     ],
 )
@@ -73,7 +77,7 @@ def test_c5_runtime_error_stops(tmp_path, bad_statement, location, message):
     )
     assert result.returncode == 1
     assert result.stdout == "1 row affected\n"
-    assert result.stderr.startswith(f"error: 2번째 문장 ({location}): ")
+    assert result.stderr.startswith(f"error: statement 2 ({location}): ")
     assert message in result.stderr
     assert read_table(tmp_path, "users") == USERS_HEADER + "1,yena,24\n"
     assert not (tmp_path / "data/orders.csv").exists()
@@ -93,7 +97,7 @@ def test_c6_syntax_error_runs_nothing(tmp_path, bad_statement):
     )
     assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr.startswith("error: 3번째 문장 (3줄 ")
+    assert result.stderr.startswith("error: statement 3 (line 3, ")
     assert read_table(tmp_path, "users") == USERS_HEADER
 
 
@@ -109,7 +113,7 @@ def test_c8_missing_file(tmp_path):
     result = run_cli(tmp_path, args=["a.sql"])
     assert result.returncode == 1
     assert result.stdout == ""
-    assert result.stderr == "error: a.sql 파일을 열 수 없음\n"
+    assert result.stderr == "error: cannot open a.sql\n"
 
 
 @pytest.mark.parametrize("sql", ["", "-- 주석 ;\n/* 블록 주석 ; */"])
@@ -117,3 +121,12 @@ def test_c9_empty_or_comment_only_file(tmp_path, sql):
     result = run_cli(tmp_path, sql)
     assert result.returncode == 0
     assert result.stdout == result.stderr == ""
+
+
+def test_c10_utf8_bom_is_ignored(tmp_path):
+    """메모장이 붙이는 BOM이 있어도 첫 키워드를 읽는다 (B19)."""
+    write_table(tmp_path, "users", USERS_HEADER)
+    result = run_cli(tmp_path, "﻿INSERT INTO users VALUES ('yena', 24);")
+    assert result.returncode == 0
+    assert result.stdout == "1 row affected\n"
+    assert result.stderr == ""

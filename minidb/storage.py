@@ -21,8 +21,11 @@ from pathlib import Path
 from minidb.errors import SqlError
 from minidb.schema import Schema, parse_header
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 DATA_DIR = Path("data")
-ENCODING = "utf-8"
 
 Row = tuple[int | str, ...]
 
@@ -58,9 +61,9 @@ class Table:
                 self._append_file = _open_append_file(self.path)
             csv.writer(self._append_file).writerows(rows)
         except FileNotFoundError as error:
-            raise SqlError(f"테이블 {self.name}가 없음") from error
+            raise SqlError(f"table {self.name} does not exist") from error
         except (OSError, UnicodeError, csv.Error) as error:
-            raise SqlError(f"{self.path.name} 행을 쓸 수 없음") from error
+            raise SqlError(f"cannot write rows to {self.path.name}") from error
         self._next_id = next_id + len(rows)
 
     def find_next_id(self) -> int:
@@ -78,19 +81,24 @@ class Table:
         try:
             append_file.close()
         except OSError as error:
-            raise SqlError(f"{self.path.name} 파일을 닫을 수 없음") from error
+            raise SqlError(f"cannot close {self.path.name}") from error
 
     def _decode_row(self, fields: list[str], number: int) -> Row:
-        location = f"{self.path.name} {number}번째 데이터 행"
+        location = f"{self.path.name} data row {number}"
         if len(fields) != len(self.schema.columns):
-            raise SqlError(f"{location}: 값 개수가 헤더와 다름")
+            raise SqlError(
+                f"{location}: expected {len(self.schema.columns)} values "
+                f"like the header but got {len(fields)}"
+            )
         try:
             return tuple(
                 column.type(value)
                 for column, value in zip(self.schema.columns, fields)
             )
         except ValueError as error:
-            raise SqlError(f"{location}: 값이 헤더 타입에 맞지 않음") from error
+            raise SqlError(
+                f"{location}: value does not match header type"
+            ) from error
 
     def _read_next_id(self) -> int:
         last_fields = None
@@ -106,7 +114,9 @@ class Table:
         try:
             return int(last_fields[id_index]) + 1
         except (IndexError, ValueError) as error:
-            raise SqlError(f"{self.path.name} 마지막 행의 id가 잘못됨") from error
+            raise SqlError(
+                f"{self.path.name} last row has an invalid id"
+            ) from error
 
 
 def open_table(name: str) -> Table:
@@ -120,15 +130,22 @@ def open_table(name: str) -> Table:
     return Table(name, path, parse_header(fields, path.name))
 
 
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+_ENCODING = "utf-8"
+
+
 @contextmanager
 def _open_records(path: Path) -> Iterator[Iterator[list[str]]]:
     try:
-        with path.open(encoding=ENCODING, newline="") as file:
+        with path.open(encoding=_ENCODING, newline="") as file:
             yield csv.reader(file, strict=True)
     except FileNotFoundError as error:
-        raise SqlError(f"테이블 {path.stem}가 없음") from error
+        raise SqlError(f"table {path.stem} does not exist") from error
     except (OSError, UnicodeError, csv.Error) as error:
-        raise SqlError(f"{path.name} 파일을 읽을 수 없음") from error
+        raise SqlError(f"cannot read {path.name}") from error
 
 
 def _open_append_file(path: Path) -> TextIOWrapper:
@@ -139,7 +156,7 @@ def _open_append_file(path: Path) -> TextIOWrapper:
         # 마지막 레코드에 줄바꿈이 빠져 있으면 새 행과 구분한다.
         if file.read(1) not in (b"", b"\n", b"\r"):
             file.write(b"\n")
-        return TextIOWrapper(file, encoding=ENCODING, newline="")
+        return TextIOWrapper(file, encoding=_ENCODING, newline="")
     except OSError:
         file.close()
         raise

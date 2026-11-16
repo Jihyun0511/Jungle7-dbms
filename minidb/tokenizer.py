@@ -21,6 +21,10 @@ from enum import Enum, auto
 from minidb.errors import Position, SqlError
 
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 class TokenType(Enum):
     KEYWORD = auto()    # value: 대문자 문자열 ("INSERT")
     NAME = auto()       # value: 소문자 문자열 ("users")
@@ -35,40 +39,11 @@ class TokenType(Enum):
     EOF = auto()        # 입력 끝. 목록의 마지막에 항상 하나
 
 
-KEYWORDS = frozenset({
-    "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "NULL",
-})
-
-_SYMBOLS = {
-    "*": TokenType.STAR,
-    ",": TokenType.COMMA,
-    "(": TokenType.LPAREN,
-    ")": TokenType.RPAREN,
-    ";": TokenType.SEMICOLON,
-    "=": TokenType.EQUALS,
-}
-_WHITESPACE = re.compile(r"\s+")
-_LINE_COMMENT = re.compile(r"--[^\r\n]*")
-_INTEGER = re.compile(r"[+-]?[0-9]+")
-
-
 @dataclass(frozen=True)
 class Token:
     type: TokenType
     value: str | int | None   # 기호와 EOF는 None
     position: Position
-
-
-def _read_string(text: str, start: int, position: Position) -> tuple[str, int]:
-    parts = []
-    offset = start + 1
-    while (quote := text.find("'", offset)) != -1:
-        parts.append(text[offset:quote])
-        if not text.startswith("''", quote):
-            return "".join(parts), quote + 1
-        parts.append("'")
-        offset = quote + 2
-    raise SqlError("문자열이 닫히지 않음", position)
 
 
 def tokenize(text: str) -> list[Token]:
@@ -107,7 +82,7 @@ def iter_tokens(text: str) -> Iterator[Token]:
         if text.startswith("/*", offset):
             closing = text.find("*/", offset + 2)
             if closing == -1:
-                raise SqlError("블록 주석이 닫히지 않음", position)
+                raise SqlError("unterminated block comment /*", position)
             advance(closing + 2)
             continue
 
@@ -118,30 +93,69 @@ def iter_tokens(text: str) -> Iterator[Token]:
             value, end = _read_string(text, offset, position)
             token_type = TokenType.STRING
         elif char == '"':
-            raise SqlError("큰따옴표로 감싼 이름은 지원하지 않음", position)
+            raise SqlError(
+                "double-quoted names are not supported", position,
+            )
         elif char.isalpha() or char == "_":
             end = offset + 1
             while end < len(text) and (text[end].isalnum() or text[end] == "_"):
                 end += 1
             name = text[offset:end]
             keyword = name.upper()
-            if keyword in KEYWORDS:
+            if keyword in _KEYWORDS:
                 token_type, value = TokenType.KEYWORD, keyword
             else:
                 token_type, value = TokenType.NAME, name.lower()
         elif integer := _INTEGER.match(text, offset):
             end = integer.end()
             if text.startswith(".", end):
-                raise SqlError("숫자 리터럴은 정수만 지원함", position)
+                raise SqlError(
+                    "decimal numbers are not supported (int only)", position,
+                )
             try:
                 value = int(integer[0])
             except ValueError as error:
-                raise SqlError("정수 리터럴을 읽을 수 없음", position) from error
+                raise SqlError(
+                    "integer literal is too long", position,
+                ) from error
             token_type = TokenType.INTEGER
         else:
-            raise SqlError(f"알 수 없는 문자 {char!r}", position)
+            raise SqlError(f"unknown character {char!r}", position)
 
         yield Token(token_type, value, position)
         advance(end)
 
     yield Token(TokenType.EOF, None, Position(line, column))
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+_KEYWORDS = frozenset({
+    "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "NULL",
+})
+
+_SYMBOLS = {
+    "*": TokenType.STAR,
+    ",": TokenType.COMMA,
+    "(": TokenType.LPAREN,
+    ")": TokenType.RPAREN,
+    ";": TokenType.SEMICOLON,
+    "=": TokenType.EQUALS,
+}
+_WHITESPACE = re.compile(r"\s+")
+_LINE_COMMENT = re.compile(r"--[^\r\n]*")
+_INTEGER = re.compile(r"[+-]?[0-9]+")
+
+
+def _read_string(text: str, start: int, position: Position) -> tuple[str, int]:
+    parts = []
+    offset = start + 1
+    while (quote := text.find("'", offset)) != -1:
+        parts.append(text[offset:quote])
+        if not text.startswith("''", quote):
+            return "".join(parts), quote + 1
+        parts.append("'")
+        offset = quote + 2
+    raise SqlError("unterminated string", position)

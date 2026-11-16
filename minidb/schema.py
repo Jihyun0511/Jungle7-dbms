@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 from minidb.errors import SqlError
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 TYPES = {"int": int, "str": str}
 
 
@@ -47,34 +51,34 @@ class Schema:
 def parse_header(fields: list[str], file_name: str) -> Schema:
     """csv로 읽은 첫 줄(['id:int', 'name:str', ...])을 Schema로 바꾼다.
 
-    file_name: 에러 메시지용 ('users.csv 헤더 3번째 컬럼: 모르는 타입 float')
+    file_name: 에러 메시지용 ('users.csv header column 3: unknown type float')
     """
     if not fields:
-        raise SqlError(f"{file_name} 헤더가 비어 있음")
+        raise SqlError(f"{file_name} header is empty")
 
     columns = []
     names = set()
     for index, field in enumerate(fields, start=1):
-        location = f"{file_name} 헤더 {index}번째 컬럼"
+        location = f"{file_name} header column {index}"
         name, _, type_name = field.partition(":")
         name = name.strip().lower()
         type_name = type_name.strip()
         if not type_name:
-            raise SqlError(f"{location}: 타입 없음")
+            raise SqlError(f"{location}: missing type")
         column_type = TYPES.get(type_name)
         if column_type is None:
-            raise SqlError(f"{location}: 모르는 타입 {type_name}")
+            raise SqlError(f"{location}: unknown type {type_name}")
         if name in names:
-            raise SqlError(f"{location}: 이름 중복 {name}")
+            raise SqlError(f"{location}: duplicate name {name}")
         if not name:
-            raise SqlError(f"{location}: 이름 없음")
+            raise SqlError(f"{location}: missing name")
         columns.append(Column(name, column_type))
         names.add(name)
 
     schema = Schema(columns)
     id_index = schema.find("id")
     if id_index is None:
-        raise SqlError(f"{file_name} 헤더에 id 컬럼 없음")
+        raise SqlError(f"{file_name} header has no id column")
     if columns[id_index].type is not int:
-        raise SqlError(f"{file_name} 헤더의 id 컬럼은 int여야 함")
+        raise SqlError(f"{file_name} header: id column must be int")
     return schema

@@ -52,13 +52,13 @@ def test_e2_user_given_id_is_error(engine, workspace, clause):
     ],
 )
 def test_e3_value_count_mismatch(engine, clause):
-    with pytest.raises(SqlError, match="값 개수 불일치"):
+    with pytest.raises(SqlError, match="expected 2 values but got"):
         engine.execute(f"INSERT INTO users {clause};")
 
 
 def test_e4_strict_types(engine):
     for row in ("('yena', '24')", "(24, 24)"):
-        with pytest.raises(SqlError, match="타입"):
+        with pytest.raises(SqlError, match="but got"):
             engine.execute(f"INSERT INTO users VALUES {row};")
     engine.execute("INSERT INTO users VALUES ('yena', -5);")
     assert engine.execute("SELECT * FROM users;").rows == [(1, "yena", -5)]
@@ -66,9 +66,9 @@ def test_e4_strict_types(engine):
 
 def test_e5_column_list_errors(engine, workspace):
     for columns, message in (
-        ("name, nope", "컬럼 nope가 없음"),
-        ("name, NAME", "컬럼 name 중복"),
-        ("name", "컬럼 누락"),
+        ("name, nope", "column nope does not exist"),
+        ("name, NAME", "column name appears twice"),
+        ("name", "INSERT column list is missing age"),
     ):
         with pytest.raises(SqlError, match=message):
             engine.execute(f"INSERT INTO users ({columns}) VALUES ('yena');")
@@ -78,7 +78,7 @@ def test_e5_column_list_errors(engine, workspace):
 
 
 def test_e6_bad_row_writes_nothing(engine, workspace):
-    with pytest.raises(SqlError, match="타입"):
+    with pytest.raises(SqlError, match="but got"):
         engine.execute(
             "INSERT INTO users VALUES ('a', 1), ('b', 'x'), ('c', 3);"
         )
@@ -89,12 +89,12 @@ def test_e6_bad_row_writes_nothing(engine, workspace):
 
 
 def test_e6_execute_rejects_multiple_statements_before_writing(engine):
-    with pytest.raises(SqlError, match="정확히 하나"):
+    with pytest.raises(SqlError, match="expected exactly one statement"):
         engine.execute(
             "INSERT INTO users VALUES ('a', 1); SELECT * FROM users;"
         )
     assert engine.execute("SELECT * FROM users;").rows == []
-    with pytest.raises(SqlError, match="정확히 하나"):
+    with pytest.raises(SqlError, match="expected exactly one statement"):
         engine.execute("-- comment only")
 
 
@@ -106,7 +106,7 @@ def test_e7_select_columns(engine):
     assert engine.execute("SELECT age, id FROM users;") == Result(
         kind="select", columns=["age", "id"], rows=[(24, 1)],
     )
-    with pytest.raises(SqlError, match="컬럼 nope가 없음") as error:
+    with pytest.raises(SqlError, match="column nope does not exist") as error:
         engine.execute("SELECT nope FROM users;")
     assert error.value.position == Position(1, 8)
 
@@ -129,7 +129,7 @@ def test_e8_where(engine, capsys):
 
 
 def test_e9_where_unknown_column_is_error(engine):
-    with pytest.raises(SqlError, match="컬럼 nope가 없음"):
+    with pytest.raises(SqlError, match="column nope does not exist"):
         engine.execute("SELECT * FROM users WHERE nope = 1;")
 
 
@@ -141,7 +141,7 @@ def test_e9_where_unknown_column_is_error(engine):
     ],
 )
 def test_e10_missing_table_is_error(engine, workspace, sql, position):
-    with pytest.raises(SqlError, match="테이블 orders가 없음") as error:
+    with pytest.raises(SqlError, match="table orders does not exist") as error:
         engine.execute(sql)
     assert error.value.position == position
     assert not (workspace / "data/orders.csv").exists()
@@ -156,5 +156,5 @@ def test_e11_table_name_ignores_case(engine, workspace):
 
 @pytest.mark.parametrize("condition", ["age = '24'", "name = 24"])
 def test_e12_where_type_mismatch_is_error(engine, condition):
-    with pytest.raises(SqlError, match="타입"):
+    with pytest.raises(SqlError, match="but got"):
         engine.execute(f"SELECT * FROM users WHERE {condition};")

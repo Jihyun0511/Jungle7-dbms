@@ -2,13 +2,14 @@
 
 규칙 (노션 요구분석 번호):
 - B2  인자가 없거나 2개 이상이면 USAGE를 stderr로, 종료 코드 1.
-      파일을 못 열면 'error: a.sql 파일을 열 수 없음', 종료 코드 1. 빈 파일은 종료 코드 0
+      파일을 못 열면 'error: cannot open a.sql', 종료 코드 1. 빈 파일은 종료 코드 0
 - B17 파일 전체를 먼저 파싱 → 문법 에러면 아무것도 실행하지 않고 1.
       실행 에러가 나면 그 자리에서 멈추고 1. 에러는 stderr로 SqlError.format()
 - B14 에러로 멈춰도 try/finally로 engine.close()를 부른다 (c5)
 - B16 SELECT: CSV 그대로(헤더 포함). 0건이면 헤더 다음 줄에 '(0 rows)'.
       값 안의 줄바꿈은 '\\n' 두 글자로 바꿔 한 줄로.
       INSERT: 'N rows affected', 1건이면 '1 row affected'
+- B19 SQL 파일은 utf-8-sig로 읽는다 (메모장 BOM 무시)
 
 담당: (이름)
 """
@@ -23,6 +24,10 @@ from minidb.errors import SqlError
 from minidb.parser import parse_script
 from minidb.statements import Statement
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 USAGE = "usage: python sql_processor.py <file.sql>"
 
 
@@ -33,10 +38,10 @@ def main(argv: list[str]) -> int:
         return 1
 
     try:
-        with Path(argv[0]).open(encoding="utf-8", newline="") as file:
+        with Path(argv[0]).open(encoding=_SQL_ENCODING, newline="") as file:
             text = file.read()
     except (OSError, ValueError):
-        print(f"error: {argv[0]} 파일을 열 수 없음", file=sys.stderr)
+        print(f"error: cannot open {argv[0]}", file=sys.stderr)
         return 1
 
     try:
@@ -63,6 +68,14 @@ def format_result(result: Result) -> str:
     if not result.rows:
         output.write("(0 rows)\n")
     return output.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+# 윈도우 메모장이 붙이는 BOM을 SQL로 읽지 않게 utf-8-sig로 연다.
+_SQL_ENCODING = "utf-8-sig"
 
 
 def _execute_statements(statements: list[Statement]) -> None:

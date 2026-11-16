@@ -23,12 +23,12 @@ def test_s1_read_header(workspace):
 @pytest.mark.parametrize(
     ("header", "message"),
     [
-        ("id:int,age:float\n", "2번째 컬럼: 모르는 타입 float"),
-        ("id:int,name\n", "2번째 컬럼: 타입 없음"),
-        ("id:int,name:str,NAME:str\n", "3번째 컬럼: 이름 중복 name"),
-        ("name:str\n", "id 컬럼 없음"),
-        ("id:str\n", "id 컬럼은 int여야 함"),
-        ("", "헤더가 비어 있음"),
+        ("id:int,age:float\n", "column 2: unknown type float"),
+        ("id:int,name\n", "column 2: missing type"),
+        ("id:int,name:str,NAME:str\n", "column 3: duplicate name name"),
+        ("name:str\n", "has no id column"),
+        ("id:str\n", "id column must be int"),
+        ("", "header is empty"),
     ],
 )
 def test_s2_header_errors(workspace, header, message):
@@ -41,7 +41,7 @@ def test_s2b_only_first_header_error(workspace):
     write_table(workspace, "users", "name,name:float\n")
     with pytest.raises(SqlError) as error:
         open_table("users")
-    assert error.value.message == "users.csv 헤더 1번째 컬럼: 타입 없음"
+    assert error.value.message == "users.csv header column 1: missing type"
 
 
 def test_s3_values_get_schema_types(workspace):
