@@ -9,16 +9,18 @@
 - B7  없는 컬럼을 SELECT하면 에러
 - B8  WHERE column = value. 없는 컬럼이면 에러. 값은 대소문자 구분 (B5)
 - B21 WHERE 값 타입이 컬럼과 다르면 에러 (e12)
+- Phase 2  WHERE id = 값은 테이블별 메모리 B+ 트리를 사용한다.
 
 담당: (이름)
 """
 
 from dataclasses import dataclass, field
 
+from minidb.bptree import BPlusTree
 from minidb.errors import SqlError
 from minidb.parser import parse_script
 from minidb.schema import Column, Schema
-from minidb.statements import Insert, Name, Select, Statement, Value
+from minidb.statements import Insert, Name, Select, Statement, Value, Where
 from minidb.storage import Row, Table, open_table
 
 # ---------------------------------------------------------------------------
@@ -46,6 +48,7 @@ class Engine:
 
     def __init__(self) -> None:
         self.tables: dict[str, Table] = {}
+        self._indexes: dict[str, BPlusTree[Row]] = {}
 
     def execute(self, sql: str) -> Result:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
@@ -61,8 +64,8 @@ class Engine:
         try:
             table = self._get_table(statement.table.text)
             if isinstance(statement, Insert):
-                return _insert(table, statement)
-            return _select(table, statement)
+                return self._insert(table, statement)
+            return self._select(table, statement)
         except SqlError as error:
             if error.position is None and isinstance(
                 error.__cause__, FileNotFoundError
@@ -80,6 +83,7 @@ class Engine:
                 if first_error is None:
                     first_error = error
         self.tables.clear()
+        self._indexes.clear()
         if first_error is not None:
             raise first_error
 
@@ -90,27 +94,69 @@ class Engine:
             self.tables[name] = table
         return table
 
+    def _insert(self, table: Table, statement: Insert) -> Result:
+        schema = table.schema
+        column_indices = _insert_column_indices(schema, statement)
+        rows = [
+            _check_insert_row(schema, column_indices, values, statement.table)
+            for values in statement.rows
+        ]
+
+        id_index = schema.find("id")
+        assert id_index is not None
+        next_id = table.find_next_id()
+        for row_id, row in enumerate(rows, start=next_id):
+            row[id_index] = row_id
+
+        stored_rows = [tuple(row) for row in rows]
+        index = self._get_index(table, id_index)
+        table.append_rows(stored_rows)
+        for row_id, stored_row in enumerate(stored_rows, start=next_id):
+            index.insert(row_id, stored_row)
+        return Result(kind="insert", affected=len(stored_rows))
+
+    def _select(self, table: Table, statement: Select) -> Result:
+        schema = table.schema
+        if statement.columns is None:
+            indices = list(range(len(schema.columns)))
+        else:
+            indices = [_find_column(schema, name) for name in statement.columns]
+
+        if statement.where is None:
+            matching_rows = table.read_rows()
+        else:
+            matching_rows = self._find_matching_rows(table, statement.where)
+        rows = [tuple(row[index] for index in indices) for row in matching_rows]
+        return Result(
+            kind="select", columns=[schema.columns[i].name for i in indices],
+            rows=rows,
+        )
+
+    def _find_matching_rows(self, table: Table, where: Where) -> list[Row]:
+        column_index = _find_column(table.schema, where.column)
+        value = _check_value(table.schema.columns[column_index], where.value)
+        if where.column.text == "id":
+            assert isinstance(value, int)
+            return self._get_index(table, column_index).find(value)
+        return [row for row in table.read_rows() if row[column_index] == value]
+
+    def _get_index(self, table: Table, id_index: int) -> BPlusTree[Row]:
+        index = self._indexes.get(table.name)
+        if index is not None:
+            return index
+
+        index = BPlusTree()
+        for row in table.read_rows():
+            row_id = row[id_index]
+            assert isinstance(row_id, int)
+            index.insert(row_id, row)
+        self._indexes[table.name] = index
+        return index
+
 
 # ---------------------------------------------------------------------------
 # 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
 # ---------------------------------------------------------------------------
-
-
-def _insert(table: Table, statement: Insert) -> Result:
-    schema = table.schema
-    column_indices = _insert_column_indices(schema, statement)
-    rows = [
-        _check_insert_row(schema, column_indices, values, statement.table)
-        for values in statement.rows
-    ]
-
-    id_index = schema.find("id")
-    assert id_index is not None
-    next_id = table.find_next_id()
-    for row_id, row in enumerate(rows, start=next_id):
-        row[id_index] = row_id
-    table.append_rows([tuple(row) for row in rows])
-    return Result(kind="insert", affected=len(rows))
 
 
 def _insert_column_indices(schema: Schema, statement: Insert) -> list[int]:
@@ -162,32 +208,6 @@ def _check_insert_row(
     for index, value in zip(indices, values):
         row[index] = _check_value(schema.columns[index], value)
     return row
-
-
-def _select(table: Table, statement: Select) -> Result:
-    schema = table.schema
-    if statement.columns is None:
-        indices = list(range(len(schema.columns)))
-    else:
-        indices = [_find_column(schema, name) for name in statement.columns]
-
-    where_index = None
-    where_value = None
-    if statement.where is not None:
-        where_index = _find_column(schema, statement.where.column)
-        where_value = _check_value(
-            schema.columns[where_index], statement.where.value,
-        )
-
-    rows = [
-        tuple(row[index] for index in indices)
-        for row in table.read_rows()
-        if where_index is None or row[where_index] == where_value
-    ]
-    return Result(
-        kind="select", columns=[schema.columns[i].name for i in indices],
-        rows=rows,
-    )
 
 
 def _find_column(schema: Schema, name: Name) -> int:
