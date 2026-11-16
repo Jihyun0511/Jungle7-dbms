@@ -19,10 +19,12 @@ from typing import TextIO
 from minidb.errors import SqlError
 from minidb.schema import ID_COLUMN, Column, Schema, parse_header
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 DATA_DIR = Path("data")
 ENCODING = "utf-8"
-# 헤더를 손으로 쓴 파일과 같은 줄바꿈을 쓰려고 csv 기본값(\r\n) 대신 \n을 쓴다.
-LINE_END = "\n"
 
 Row = tuple[int | str, ...]
 
@@ -105,7 +107,7 @@ class Table:
             self._file = open(
                 self.path, "a", encoding=ENCODING, newline="",
             )
-            self._writer = csv.writer(self._file, lineterminator=LINE_END)
+            self._writer = csv.writer(self._file, lineterminator=_LINE_END)
         return self._writer
 
 
@@ -119,6 +121,14 @@ def open_table(name: str) -> Table:
         raise SqlError(f"테이블 {name}가 없음")
     schema = _read_schema(path)
     return Table(name, path, schema)
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+# 헤더를 손으로 쓴 파일과 같은 줄바꿈을 쓰려고 csv 기본값(\r\n) 대신 \n을 쓴다.
+_LINE_END = "\n"
 
 
 def _convert_field(field: str, column: Column, where: str) -> int | str:
@@ -142,7 +152,7 @@ def _add_missing_line_end(path: Path) -> None:
         last_byte = file.read(1)
     if last_byte != b"\n":
         with open(path, "a", encoding=ENCODING, newline="") as file:
-            file.write(LINE_END)
+            file.write(_LINE_END)
 
 
 def _read_schema(path: Path) -> Schema:

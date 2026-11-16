@@ -21,6 +21,37 @@ from minidb.errors import SqlError
 from minidb.statements import Insert, Name, Select, Statement, Value, Where
 from minidb.tokenizer import Token, TokenType, tokenize
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
+
+def parse_script(text: str) -> list[Statement]:
+    """SQL 파일 내용 전체를 문장 목록으로 바꾼다. 빈 파일·주석만 있으면 [] (B2).
+
+    에러는 줄·칸 위치로만 알린다. 토크나이저 에러는 문장을 나누기 전에 나서
+    문장 번호를 알 수 없으므로, 모든 에러를 같은 모양으로 맞추려고
+    statement는 채우지 않는다.
+    """
+    return parse(tokenize(text))
+
+
+def parse(tokens: list[Token]) -> list[Statement]:
+    """토큰 목록(마지막은 EOF)을 문장 목록으로 바꾼다."""
+    parser = _Parser(tokens)
+    statements = []
+    while True:
+        parser.skip_semicolons()
+        if parser.is_at_end():
+            return statements
+        statements.append(_parse_statement(parser))
+        parser.expect(TokenType.SEMICOLON, ";")
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
 _SYMBOL_TEXT = {
     TokenType.STAR: "*",
     TokenType.COMMA: ",",
@@ -31,30 +62,6 @@ _SYMBOL_TEXT = {
 }
 
 _Item = TypeVar("_Item")
-
-
-def parse_script(text: str) -> list[Statement]:
-    """SQL 파일 내용 전체를 문장 목록으로 바꾼다. 빈 파일·주석만 있으면 [] (B2).
-
-    SqlError를 던질 때 statement(몇 번째 문장인지)를 채운다.
-    토크나이저 에러는 아직 문장을 나누기 전이라 statement가 None이다.
-    """
-    return parse(tokenize(text))
-
-
-def parse(tokens: list[Token]) -> list[Statement]:
-    """토큰 목록(마지막은 EOF)을 문장 목록으로 바꾼다.
-
-    빈 문장(;;)은 번호를 세지 않는다. 그래야 CLI의 문장 번호와 맞는다.
-    """
-    parser = _Parser(tokens)
-    statements = []
-    while True:
-        parser.skip_semicolons()
-        if parser.is_at_end():
-            return statements
-        number = len(statements) + 1
-        statements.append(_parse_numbered_statement(parser, number))
 
 
 class _Parser:
@@ -117,16 +124,6 @@ def _describe(token: Token) -> str:
     if token.type is TokenType.NAME:
         return f"이름 {token.value}"
     return f"'{_SYMBOL_TEXT[token.type]}'"
-
-
-def _parse_numbered_statement(parser: _Parser, number: int) -> Statement:
-    try:
-        statement = _parse_statement(parser)
-        parser.expect(TokenType.SEMICOLON, ";")
-    except SqlError as error:
-        error.statement = number
-        raise
-    return statement
 
 
 def _parse_statement(parser: _Parser) -> Statement:

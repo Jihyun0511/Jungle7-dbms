@@ -21,6 +21,10 @@ from minidb.schema import ID_COLUMN, Column, Schema
 from minidb.statements import Insert, Name, Select, Statement, Value, Where
 from minidb.storage import Row, Table, open_table
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 
 @dataclass
 class Result:
@@ -91,6 +95,11 @@ class Engine:
         if name.text not in self.tables:
             self.tables[name.text] = _open_table_at(name)
         return self.tables[name.text]
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
 
 
 def _open_table_at(name: Name) -> Table:

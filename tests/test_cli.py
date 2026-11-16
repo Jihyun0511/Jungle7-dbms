@@ -68,7 +68,7 @@ def test_c5_runtime_error_stops(users):
         "SELECT * FROM users;\n"
     ))
     assert done.stdout == "1 row affected\n"
-    assert "error: 2번째 문장 (2줄" in done.stderr
+    assert "error: (2줄 34칸)" in done.stderr
     assert done.returncode == 1
     assert read_table(users, "users") == USERS_HEADER + "1,yena,24\n"
 
@@ -81,7 +81,7 @@ def test_c6_syntax_error_runs_nothing(users):
         "SELECT * users;\n"
     ))
     assert done.stdout == ""
-    assert "error: 3번째 문장 (3줄" in done.stderr
+    assert "error: (3줄 10칸)" in done.stderr
     assert done.returncode == 1
     assert read_table(users, "users") == USERS_HEADER
 

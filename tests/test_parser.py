@@ -2,7 +2,7 @@
 
 import pytest
 
-from minidb.errors import SqlError
+from minidb.errors import Position, SqlError
 from minidb.parser import parse_script
 from minidb.statements import Insert, Select
 
@@ -63,7 +63,7 @@ def test_p5_missing_last_semicolon_is_error():
     """마지막 ; 없음 → SqlError (B1)"""
     with pytest.raises(SqlError) as caught:
         parse_script("SELECT * FROM users; SELECT * FROM users")
-    assert caught.value.statement == 2
+    assert caught.value.position == Position(1, 41)
 
 
 def test_p6_empty_statements_are_ignored():
@@ -93,4 +93,3 @@ def test_p8_syntax_errors_have_position(sql):
     with pytest.raises(SqlError) as caught:
         parse_script(sql)
     assert caught.value.position is not None
-    assert caught.value.statement == 1

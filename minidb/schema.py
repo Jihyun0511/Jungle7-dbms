@@ -13,6 +13,10 @@ from dataclasses import dataclass
 
 from minidb.errors import SqlError
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 TYPES = {"int": int, "str": str}
 ID_COLUMN = "id"
 
@@ -63,6 +67,11 @@ def parse_header(fields: list[str], file_name: str) -> Schema:
         columns.append(column)
     _check_id_column(columns, file_name)
     return Schema(columns)
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
 
 
 def _parse_header_field(field: str, where: str) -> Column:

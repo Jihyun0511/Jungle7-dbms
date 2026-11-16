@@ -18,6 +18,10 @@ from enum import Enum, auto
 
 from minidb.errors import Position, SqlError
 
+# ---------------------------------------------------------------------------
+# 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
+# ---------------------------------------------------------------------------
+
 
 class TokenType(Enum):
     KEYWORD = auto()    # value: 대문자 문자열 ("INSERT")
@@ -36,15 +40,6 @@ class TokenType(Enum):
 KEYWORDS = frozenset({
     "INSERT", "INTO", "VALUES", "SELECT", "FROM", "WHERE", "NULL",
 })
-
-_SYMBOLS = {
-    "*": TokenType.STAR,
-    ",": TokenType.COMMA,
-    "(": TokenType.LPAREN,
-    ")": TokenType.RPAREN,
-    ";": TokenType.SEMICOLON,
-    "=": TokenType.EQUALS,
-}
 
 
 @dataclass(frozen=True)
@@ -67,6 +62,20 @@ def tokenize(text: str) -> list[Token]:
         tokens.append(token)
         if token.type is TokenType.EOF:
             return tokens
+
+
+# ---------------------------------------------------------------------------
+# 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
+# ---------------------------------------------------------------------------
+
+_SYMBOLS = {
+    "*": TokenType.STAR,
+    ",": TokenType.COMMA,
+    "(": TokenType.LPAREN,
+    ")": TokenType.RPAREN,
+    ";": TokenType.SEMICOLON,
+    "=": TokenType.EQUALS,
+}
 
 
 class _Scanner:
