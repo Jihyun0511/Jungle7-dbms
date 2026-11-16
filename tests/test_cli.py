@@ -7,14 +7,18 @@ run_cli로 sql_processor.py를 진짜 프로세스로 실행하고 stdout, stder
 
 import pytest
 
-from conftest import USERS_HEADER, read_table, run_cli, write_table  # noqa: F401
+from conftest import (  # noqa: F401
+    USERS_HEADER, read_table, run_cli, write_table,
+)
 
 TODO = pytest.mark.skip(reason="아직 작성하지 않음")
 
 
 @TODO
 def test_c1_insert_and_select(tmp_path):
-    """INSERT 2행 + SELECT → stdout '2 rows affected' + CSV 결과, stderr 없음, 0 (B16)"""
+    """INSERT 2행 + SELECT → stdout '2 rows affected' + CSV 결과,
+    stderr 없음, 0 (B16)
+    """
 
 
 @TODO

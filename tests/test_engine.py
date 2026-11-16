@@ -20,12 +20,16 @@ def test_e1_ids_are_assigned(workspace):
 
 @TODO
 def test_e2_user_given_id_is_error(workspace):
-    """VALUES (5, 'yena', 24), (id, name, age) VALUES (...) → SqlError, 파일은 헤더만 (B13)"""
+    """VALUES (5, 'yena', 24), (id, name, age) VALUES (...) → SqlError,
+    파일은 헤더만 (B13)
+    """
 
 
 @TODO
 def test_e3_value_count_mismatch(workspace):
-    """VALUES ('yena'), VALUES ('yena', 24, 'x'), (name, age) VALUES ('yena') → SqlError (B6)"""
+    """VALUES ('yena'), VALUES ('yena', 24, 'x'),
+    (name, age) VALUES ('yena') → SqlError (B6)
+    """
 
 
 @TODO
@@ -42,17 +46,23 @@ def test_e5_column_list_errors(workspace):
 
 @TODO
 def test_e6_bad_row_writes_nothing(workspace):
-    """('a', 1), ('b', 'x'), ('c', 3) → SqlError, 파일은 헤더만, 다음 INSERT의 id는 1 (B13, B17)"""
+    """('a', 1), ('b', 'x'), ('c', 3) → SqlError, 파일은 헤더만,
+    다음 INSERT의 id는 1 (B13, B17)
+    """
 
 
 @TODO
 def test_e7_select_columns(workspace):
-    """SELECT name, age → [name, age] / SELECT age, id → 적힌 순서 / SELECT nope → SqlError (B7)"""
+    """SELECT name, age → [name, age] / SELECT age, id → 적힌 순서 /
+    SELECT nope → SqlError (B7)
+    """
 
 
 @TODO
 def test_e8_where(workspace):
-    """id = 2 → kim / age = 24 → yena, Yena / name = 'yena' → yena만 / name = 'park' → 0건 (B8, B5)"""
+    """id = 2 → kim / age = 24 → yena, Yena / name = 'yena' → yena만 /
+    name = 'park' → 0건 (B8, B5)
+    """
 
 
 @TODO

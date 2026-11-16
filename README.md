@@ -53,12 +53,14 @@ data/users.csv           예시 테이블 (헤더만)
 cli.main(["input.sql"])
   ├─ parse_script(text)        → [Insert, Select, ...]   문법 에러면 아무것도 실행하지 않음
   ├─ engine.run(statement)     → Result                  문장마다. 에러면 그 자리에서 멈춤
-  │    └─ open_table(name)     → Table (schema, read_rows, append_rows, next_id)
+  │    └─ open_table(name)     → Table (schema, read_rows, append_rows, find_next_id)
   ├─ format_result(result)     → stdout
   └─ finally: engine.close()   에러가 나도 버퍼를 비움
 ```
 
 ## 모듈 사이의 약속
+
+이름·에러 처리·배치·커밋 메시지 규칙은 [CLAUDE.md](CLAUDE.md)에 있다.
 
 - 모듈끼리는 `statements.py`의 자료형과 각 함수의 시그니처로만 주고받는다. 바꿀 때는 관련 담당이 같이 정한다.
 - 사용자에게 보여 줄 에러는 전부 `SqlError`로 던진다. 출력은 CLI만 한다 (`engine`·`storage`는 print하지 않음).

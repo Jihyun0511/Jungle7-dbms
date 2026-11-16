@@ -26,6 +26,7 @@ class Column:
 class Schema:
     columns: list[Column]   # 헤더에 적힌 순서
 
+    @property
     def names(self) -> list[str]:
         """헤더 순서대로 컬럼 이름."""
         raise NotImplementedError
@@ -34,6 +35,7 @@ class Schema:
         """컬럼 위치(0부터). 없으면 None."""
         raise NotImplementedError
 
+    @property
     def value_columns(self) -> list[Column]:
         """id를 뺀 컬럼. 컬럼 목록 없는 INSERT가 값을 받는 순서 (B6)."""
         raise NotImplementedError

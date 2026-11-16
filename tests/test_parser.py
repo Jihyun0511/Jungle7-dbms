@@ -13,12 +13,16 @@ TODO = pytest.mark.skip(reason="아직 작성하지 않음")
 
 @TODO
 def test_p1_insert_multiple_rows():
-    """INSERT INTO users VALUES ('a', 1), ('b', 2); → Insert, columns None, 행 2개 (B6)"""
+    """INSERT INTO users VALUES ('a', 1), ('b', 2);
+    → Insert, columns None, 행 2개 (B6)
+    """
 
 
 @TODO
 def test_p2_insert_with_column_list():
-    """INSERT INTO users (age, name) VALUES (1, 'a'); → columns [age, name] (B6)"""
+    """INSERT INTO users (age, name) VALUES (1, 'a');
+    → columns [age, name] (B6)
+    """
 
 
 @TODO

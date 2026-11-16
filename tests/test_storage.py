@@ -15,7 +15,9 @@ TODO = pytest.mark.skip(reason="아직 작성하지 않음")
 
 @TODO
 def test_s1_read_header(workspace):
-    """id:int,name:str,age:int → 컬럼 3개 [(id,int), (name,str), (age,int)] (B11)"""
+    """id:int,name:str,age:int
+    → 컬럼 3개 [(id, int), (name, str), (age, int)] (B11)
+    """
 
 
 @TODO

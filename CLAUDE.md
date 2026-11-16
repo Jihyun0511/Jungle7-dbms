@@ -1,0 +1,117 @@
+# 미니 DBMS — 작업 규칙
+
+## 건드리지 않는 것
+
+- 아래 공용 약속은 담당끼리 합의 없이 바꾸지 않는다. 바꿔야 할 것 같으면 먼저 팀에 공유한다.
+  - `minidb/errors.py`, `minidb/statements.py`
+  - 각 모듈 공개 함수의 모양(이름, 인자, 반환 타입): `tokenize`, `parse_script`, `parse_header`, `open_table`, `Table`의 메서드, `Engine`, `Result`, `main`, `format_result`
+  - `tests/conftest.py`의 도우미 (`workspace`, `write_table`, `read_table`, `run_cli`)
+- 남의 담당 테스트가 틀려 보이면 직접 고치지 말고 그 담당에게 알린다.
+- 규칙의 근거는 노션 Phase 1 요구분석(B1~B22)이다. 요구분석과 다르게 구현해야 하면 문서부터 고친다.
+
+## 클린 코드 규칙 (Python)
+
+### 1. 함수 이름
+
+- 동작하는 함수는 동사로 시작한다: `find_`, `read_`, `append_`, `open_`, `parse_`, `check_`, `format_`, `create_`
+- 참/거짓을 돌려주는 함수는 `is_` / `has_`로 시작한다: `is_keyword`, `has_column`
+- 계산 없이 값을 보여 주는 속성은 `@property`로 하고 명사로 쓴다: `schema.names`
+- 예외: 널리 알려진 이름은 그대로 둔다 (`tokenize`, `main`)
+- 모듈 밖에서 쓰지 않는 도우미는 이름 앞에 `_`를 붙인다: `_read_string`
+
+### 2. 변수 이름
+
+- 짧은 이름·줄임말은 쓰지 않는다: `tok` → `token`, `stmt` → `statement`, `col` → `column`, `idx` → `index`, `f` → `file`
+- 예외: 반복문 인덱스처럼 의미 없는 변수 (`i`), 테스트의 `tmp_path`처럼 pytest가 정한 이름
+
+### 3. 함수 크기
+
+- 함수 하나는 일 하나만 한다. 이름 하나로 말할 수 없으면 쪼갠다.
+- 공개 함수는 단계 목록처럼 읽히게 한다. 세부 작업(글자 세기, csv 호출 등)은 도우미에 두고, 공개 함수는 도우미 이름만 부른다.
+- 중첩은 두 단계까지 (`for` 안의 `if` 정도). 더 깊어지면 안쪽을 함수로 뺀다.
+- 줄 수 제한은 따로 두지 않는다.
+
+### 4. 에러 처리
+
+- 실패하면 바로 `raise`한다(early return). 성공 흐름은 들여쓰기 없이 맨 아래까지 이어진다.
+- 상태를 바꾸기 전에 실패할 수 있는 검사를 다 끝낸다. 그래야 에러가 나도 파일·다음 id가 그대로 남는다 (B17, e6).
+- 사용자에게 보여 줄 에러는 전부 `SqlError`로 던진다. 출력은 CLI만 한다.
+- `None`은 "없음"이 정상인 경우에만 돌려준다 (`schema.find`). 실패를 `None`으로 알리지 않는다.
+- `except`는 예외 타입을 꼭 적는다. 맨 `except:`나 `except Exception:`으로 삼키지 않는다.
+
+### 5. 자원 소유권
+
+- 파일을 연 쪽이 닫는다. `Table`은 `Engine`이 들고 있고 `Engine.close()`가 닫는다.
+- 함수 안에서만 쓰는 파일은 `with open(...)`으로 연다.
+- 인자로 받은 리스트·객체를 고치지 않는다. 바꾼 값이 필요하면 새로 만들어 돌려준다.
+- 공용 자료형은 `@dataclass(frozen=True)`로 둔다 (`Result`만 예외).
+
+### 6. 주석
+
+- 무엇을 하는지는 이름으로, 주석에는 "왜"만 쓴다. 이름으로 알 수 있는 내용이면 주석을 쓰지 않는다.
+- docstring에는 이름으로 드러나지 않는 약속만 적는다 (`None`의 뜻, 경계 조건, 언제 에러인지).
+- 모듈 맨 위 docstring에 그 파일이 지킬 요구분석 번호를 적는다: `(B13)`, `(s5b)`
+- 주석은 한국어로 쓴다.
+
+### 7. 파일 안 배치 (위 → 아래)
+
+위에서부터 읽으면 큰 흐름 → 세부 순서로 내려가게 둔다.
+
+1. 모듈 docstring
+2. `import`
+3. 상수와 자료형 (`TYPES`, `@dataclass`, `Enum`)
+4. 공개 함수·클래스
+5. 도우미 함수: 처음 불리는 순서대로. 부르는 함수 바로 아래에 그 함수가 부르는 도우미를 둔다.
+
+- 예: `tokenize`가 `_read_string`을 부르고, `_read_string`이 `_read_quote`를 부르면 `tokenize` → `_read_string` → `_read_quote` 순서
+- 이미 위에 나온 도우미는 다시 두지 않는다 (처음 나온 자리 한 곳)
+
+### 8. 스타일
+
+| 항목 | 규칙 | 예시 |
+|---|---|---|
+| `None` 비교 | `is` / `is not`으로 비교 | `if column is None:` (`if not column:` 안 씀) |
+| 참/거짓 함수 | 그대로 조건에 | `if is_keyword(word):` (`== True` 안 붙임) |
+| 빈 리스트 검사 | `len`으로 비교하지 않음 | `if not rows:` |
+| 타입 힌트 | 공개 함수의 인자와 반환값에는 꼭 씀 | `def open_table(name: str) -> Table:` |
+| 문자열 | 큰따옴표, 조합은 f-string | `f"{line}줄 {column}칸"` |
+| 들여쓰기 | 공백 4칸 | |
+| 줄 길이 | 80자 이내 | 넘으면 괄호 안에서 줄을 바꿈 |
+
+```python
+def open_table(name: str) -> Table:
+    path = DATA_DIR / f"{name}.csv"
+    if not path.exists():
+        raise SqlError(f"테이블 {name}가 없음")
+    schema = _read_schema(path)
+    return Table(name, path, schema)
+```
+
+## 테스트
+
+- 커밋 전에 `python -m pytest`를 돌린다. 내 담당 밖 테스트를 깨뜨리면 커밋하지 않는다.
+- 테스트 이름은 노션 5절 ID로 시작한다: `test_e6_bad_row_writes_nothing`
+- 진짜 `data/`를 건드리지 않는다. 단위 테스트는 `workspace`, 기능 테스트는 `run_cli(tmp_path, ...)`를 쓴다.
+
+## 커밋 메시지
+
+- 첫 줄은 `타입: 한국어 설명` 형식으로 쓴다. 콜론은 타입에 붙이고 뒤에 한 칸 띄운다 (`test :` 아님).
+- 타입
+
+| 타입 | 언제 |
+|---|---|
+| `feat` | 새 기능 |
+| `fix` | 버그 수정 |
+| `refactor` | 동작은 그대로, 구조만 바꿈 |
+| `test` | 테스트 추가·실행 결과 기록 |
+| `docs` | 문서(`*.md`) 변경 |
+
+- 한 줄 띄우고 본문에 바뀐 점을 `-` 목록으로 쓴다. 테스트를 돌렸으면 결과도 적는다.
+
+```
+feat: tokenizer 문자열 리터럴 처리 추가
+
+- '' 를 따옴표 하나로 읽고, 닫히지 않으면 시작 위치로 SqlError
+- 문자열 안 줄바꿈도 줄 번호에 반영
+- pytest: u3a, u3b, u4~u6 통과 (5 passed, 45 skipped)
+```

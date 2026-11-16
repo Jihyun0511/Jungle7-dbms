@@ -39,7 +39,7 @@ class Table:
         """검사가 끝난 행(id 포함, 스키마 순서)을 파일 끝에 쓴다. flush는 하지 않는다."""
         raise NotImplementedError
 
-    def next_id(self) -> int:
+    def find_next_id(self) -> int:
         """다음에 쓸 id. append_rows로 쓴 행만큼 늘어난다."""
         raise NotImplementedError
 
