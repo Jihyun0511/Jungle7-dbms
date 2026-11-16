@@ -9,6 +9,8 @@
 - B7  없는 컬럼을 SELECT하면 에러
 - B8  WHERE column = value. 없는 컬럼이면 에러. 값은 대소문자 구분 (B5)
 - B21 WHERE 값 타입이 컬럼과 다르면 에러 (e12)
+- Phase 2 WHERE id = ? 는 B+ 트리 인덱스로, 다른 컬럼은 선형 탐색으로 찾는다
+      (e13~e15)
 
 담당: (이름)
 """
@@ -181,13 +183,24 @@ def _select(table: Table, statement: Select) -> Result:
 
     rows = [
         tuple(row[index] for index in indices)
-        for row in table.read_rows()
-        if where_index is None or row[where_index] == where_value
+        for row in _find_rows(table, where_index, where_value)
     ]
     return Result(
         kind="select", columns=[schema.columns[i].name for i in indices],
         rows=rows,
     )
+
+
+def _find_rows(
+    table: Table, where_index: int | None, where_value: int | str | None,
+) -> list[Row]:
+    if where_index is None:
+        return table.read_rows()
+    if table.schema.columns[where_index].name == "id":
+        assert isinstance(where_value, int)
+        row = table.find_row_by_id(where_value)
+        return [] if row is None else [row]
+    return [row for row in table.read_rows() if row[where_index] == where_value]
 
 
 def _find_column(schema: Schema, name: Name) -> int:

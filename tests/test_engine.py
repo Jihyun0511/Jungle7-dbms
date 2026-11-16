@@ -1,4 +1,4 @@
-"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12."""
+"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12, Phase 2 e13~e16."""
 
 import pytest
 
@@ -158,3 +158,51 @@ def test_e11_table_name_ignores_case(engine, workspace):
 def test_e12_where_type_mismatch_is_error(engine, condition):
     with pytest.raises(SqlError, match="but got"):
         engine.execute(f"SELECT * FROM users WHERE {condition};")
+
+
+def _fail_scan():
+    raise AssertionError("WHERE id must not scan the table")
+
+
+def test_e13_where_id_uses_index_not_scan(engine, monkeypatch):
+    engine.execute("INSERT INTO users VALUES ('yena', 24), ('kim', 20);")
+    monkeypatch.setattr(engine.tables["users"], "read_rows", _fail_scan)
+    assert engine.execute("SELECT name FROM users WHERE id = 2;").rows == [
+        ("kim",),
+    ]
+
+
+def test_e14_where_id_without_match_is_empty(engine):
+    engine.execute("INSERT INTO users VALUES ('yena', 24);")
+    for row_id in (0, 2, -1):
+        result = engine.execute(f"SELECT * FROM users WHERE id = {row_id};")
+        assert result == Result(kind="select", columns=["id", "name", "age"])
+
+
+def test_e15_other_column_still_scans(engine, monkeypatch):
+    engine.execute("INSERT INTO users VALUES ('yena', 24), ('kim', 24);")
+    table = engine.tables["users"]
+    scans = []
+    original = table.read_rows
+
+    def count_scan():
+        scans.append(1)
+        return original()
+
+    monkeypatch.setattr(table, "read_rows", count_scan)
+    assert engine.execute("SELECT id FROM users WHERE age = 24;").rows == [
+        (1,), (2,),
+    ]
+    assert scans == [1]
+
+
+def test_e16_where_id_sees_rows_inserted_after_tree(engine, monkeypatch):
+    engine.execute("INSERT INTO users VALUES ('yena', 24);")
+    assert engine.execute("SELECT name FROM users WHERE id = 1;").rows == [
+        ("yena",),
+    ]
+    engine.execute("INSERT INTO users VALUES ('kim', 20), ('park', 22);")
+    monkeypatch.setattr(engine.tables["users"], "read_rows", _fail_scan)
+    assert engine.execute("SELECT name FROM users WHERE id = 3;").rows == [
+        ("park",),
+    ]

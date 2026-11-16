@@ -16,6 +16,25 @@ id:int,name:str,age:int
 
 규칙의 근거(B1~B22)는 노션의 Phase 1 요구분석 문서에 있다. 각 파일 맨 위 주석에 그 파일이 지켜야 할 번호를 적어 두었다.
 
+## Phase 2: B+ 트리 인덱스
+
+SQL 문법과 실행 방법은 Phase 1 그대로다. `WHERE id = ?`만 파일을 처음부터 훑지 않고 B+ 트리로 찾는다.
+
+- 인덱스는 id에만 둔다. 다른 컬럼 조건은 Phase 1처럼 선형 탐색이다.
+- 트리(`minidb/bptree.py`)는 메모리에 있고, `id → 그 행이 CSV에서 시작하는 바이트 위치`를 담는다. 찾으면 그 위치로 `seek`해서 행 하나만 읽는다. 테이블 파일 형식은 바꾸지 않았다.
+- 노드 하나 = 페이지 하나. 기본 order는 255(4KB ÷ (키 8B + 포인터 8B))이고, 노드 안은 `bisect`(이진 탐색)로 찾는다.
+- 트리는 그 테이블에서 `WHERE id`를 처음 실행할 때 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고, 트리가 이미 있을 때만 쓴 행을 바로 등록한다.
+- 다음 id는 Phase 1(B13)과 같다. 처음 필요할 때 파일을 훑어 찾고 기억한다.
+
+### 대용량 데이터 넣기
+
+```bash
+python make_insert_sql.py 1000000 big.sql
+python sql_processor.py big.sql
+```
+
+`users` 테이블에 넣을 INSERT 문을 만든다(행 n은 `('user{n}', n % 100)`). `--batch N`은 INSERT 문 하나에 담을 행 수다(기본 10,000). 100만 행 파일은 19.8MB이고, 처리기 한 번에 들어간다. 파일 전체를 먼저 파싱하므로(B17) 메모리를 약 700MB 쓴다.
+
 ## 구조와 담당
 
 ```
@@ -26,17 +45,21 @@ minidb/
   tokenizer.py           SQL 텍스트 → 토큰
   parser.py              토큰 → 문장 구조
   schema.py              CSV 헤더 → 스키마
-  storage.py             CSV 파일 읽기·쓰기
+  storage.py             CSV 파일 읽기·쓰기, id 인덱스
+  bptree.py              메모리 B+ 트리 (Phase 2)
   engine.py              문장 실행 → Result
   cli.py                 파일 읽기, 출력, 종료 코드
 tests/
   conftest.py            workspace, write_table, run_cli (공용, 완성)
   test_tokenizer.py      u1~u12
   test_parser.py         p1~p8
-  test_storage.py        s1~s6
-  test_engine.py         e1~e12
-  test_cli.py            c1~c9
+  test_storage.py        s1~s6, s7~s10 (Phase 2)
+  test_engine.py         e1~e12, e13~e16 (Phase 2)
+  test_cli.py            c1~c10, c11 (Phase 2)
+  test_bptree.py         b1~b7 (Phase 2)
+  test_make_insert_sql.py g1 (Phase 2)
 data/users.csv           예시 테이블 (헤더만)
+make_insert_sql.py       대용량 INSERT SQL 생성 (Phase 2)
 ```
 
 | 담당 | 파일 | 테스트 |
