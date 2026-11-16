@@ -6,6 +6,7 @@ from conftest import USERS_HEADER, read_table, write_table
 from minidb.engine import Engine, Result
 from minidb.errors import Position, SqlError
 from minidb.parser import parse_script
+from minidb.storage import Table
 
 
 @pytest.fixture
@@ -84,8 +85,11 @@ def test_e6_bad_row_writes_nothing(engine, workspace):
         )
     assert engine.execute("SELECT * FROM users;").rows == []
     assert read_table(workspace, "users") == USERS_HEADER
+    assert engine.execute("SELECT * FROM users WHERE id = 1;").rows == []
     engine.execute("INSERT INTO users VALUES ('d', 4);")
-    assert engine.execute("SELECT * FROM users;").rows == [(1, "d", 4)]
+    assert engine.execute("SELECT * FROM users WHERE id = 1;").rows == [
+        (1, "d", 4),
+    ]
 
 
 def test_e6_execute_rejects_multiple_statements_before_writing(engine):
@@ -158,3 +162,50 @@ def test_e11_table_name_ignores_case(engine, workspace):
 def test_e12_where_type_mismatch_is_error(engine, condition):
     with pytest.raises(SqlError, match="but got"):
         engine.execute(f"SELECT * FROM users WHERE {condition};")
+
+
+def test_e8_id_index_loads_existing_rows_and_avoids_later_scans(
+    engine, workspace, monkeypatch,
+):
+    write_table(workspace, "users", "name:str,id:int,age:int\nyena,4,24\n")
+    read_rows = Table.read_rows
+    scans = []
+
+    def count_scan(table):
+        scans.append(table.name)
+        return read_rows(table)
+
+    monkeypatch.setattr(Table, "read_rows", count_scan)
+    assert engine.execute("SELECT name FROM users WHERE id = 4;").rows == [
+        ("yena",),
+    ]
+    engine.execute("INSERT INTO users VALUES ('kim', 20);")
+    assert engine.execute("SELECT age FROM users WHERE id = 5;").rows == [(20,)]
+    assert engine.execute("SELECT * FROM users WHERE id = 6;").rows == []
+    assert scans == ["users"]
+
+    assert engine.execute("SELECT id FROM users WHERE age = 20;").rows == [(5,)]
+    assert scans == ["users", "users"]
+
+    engine.close()
+    assert engine.execute("SELECT name FROM users WHERE id = 5;").rows == [
+        ("kim",),
+    ]
+    assert scans == ["users", "users", "users"]
+
+
+def test_e6_failed_append_keeps_row_out_of_index(engine, monkeypatch):
+    engine.execute("INSERT INTO users VALUES ('yena', 24);")
+
+    def reject_append(table, rows):
+        raise SqlError("cannot write rows")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Table, "append_rows", reject_append)
+        with pytest.raises(SqlError, match="cannot write rows"):
+            engine.execute("INSERT INTO users VALUES ('kim', 20);")
+    assert engine.execute("SELECT * FROM users WHERE id = 2;").rows == []
+    engine.execute("INSERT INTO users VALUES ('park', 26);")
+    assert engine.execute("SELECT name FROM users WHERE id = 2;").rows == [
+        ("park",),
+    ]
