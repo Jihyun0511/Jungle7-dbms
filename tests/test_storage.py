@@ -1,57 +1,96 @@
-"""저장(CSV)·스키마 단위 테스트 (R-Q1). 노션 5절 s1~s6.
-
-workspace 픽스처로 실행 위치를 임시 폴더로 옮긴 뒤 write_table로 파일을 만든다.
-작성한 테스트는 @TODO를 지운다.
-"""
+"""저장(CSV)·스키마 단위 테스트 (R-Q1). 노션 5절 s1~s6."""
 
 import pytest
 
-from conftest import USERS_HEADER, write_table  # noqa: F401
-from minidb.schema import parse_header  # noqa: F401
-from minidb.storage import open_table  # noqa: F401
+from conftest import USERS_HEADER, read_table, write_table
+from minidb.errors import SqlError
+from minidb.schema import Column
+from minidb.storage import open_table
 
-TODO = pytest.mark.skip(reason="아직 작성하지 않음")
 
-
-@TODO
 def test_s1_read_header(workspace):
-    """id:int,name:str,age:int
-    → 컬럼 3개 [(id, int), (name, str), (age, int)] (B11)
-    """
+    write_table(workspace, "users", USERS_HEADER)
+    schema = open_table("users").schema
+    assert schema.columns == [
+        Column("id", int), Column("name", str), Column("age", int)
+    ]
+    assert schema.names == ["id", "name", "age"]
+    assert schema.find("age") == 2
+    assert schema.find("unknown") is None
+    assert schema.value_columns == [Column("name", str), Column("age", int)]
 
 
-@TODO
-def test_s2_header_errors(workspace):
-    """모르는 타입, 타입 빠짐, 이름 중복, id 없음, 빈 파일 → 각각 SqlError.
-    처음 만난 에러 하나만. 순서: 빈 파일 → 왼쪽 컬럼부터 (타입 없음 → 모르는 타입 → 이름 중복) → id 없음 (B20)
-    """
+@pytest.mark.parametrize(
+    ("header", "message"),
+    [
+        ("id:int,age:float\n", "2번째 컬럼: 모르는 타입 float"),
+        ("id:int,name\n", "2번째 컬럼: 타입 없음"),
+        ("id:int,name:str,NAME:str\n", "3번째 컬럼: 이름 중복 name"),
+        ("name:str\n", "id 컬럼 없음"),
+        ("id:str\n", "id 컬럼은 int여야 함"),
+        ("", "헤더가 비어 있음"),
+    ],
+)
+def test_s2_header_errors(workspace, header, message):
+    write_table(workspace, "users", header)
+    with pytest.raises(SqlError, match=message):
+        open_table("users")
 
 
-@TODO
 def test_s2b_only_first_header_error(workspace):
-    """name,name:float → '1번째 컬럼: 타입 없음' 하나만 (B20)"""
+    write_table(workspace, "users", "name,name:float\n")
+    with pytest.raises(SqlError) as error:
+        open_table("users")
+    assert error.value.message == "users.csv 헤더 1번째 컬럼: 타입 없음"
 
 
-@TODO
 def test_s3_values_get_schema_types(workspace):
-    """1,yena,24 → (1, 'yena', 24). 1과 24는 int (B12)"""
+    write_table(workspace, "users", USERS_HEADER + "1,yena,24\n2,024,-5\n")
+    assert open_table("users").read_rows() == [(1, "yena", 24), (2, "024", -5)]
 
 
-@TODO
 def test_s4_tricky_values_round_trip(workspace):
-    """쉼표·큰따옴표·줄바꿈이 든 값을 쓰고 다시 읽으면 그대로 (B9, B12)"""
+    write_table(workspace, "users", USERS_HEADER)
+    rows = [(1, '이름,"별명"\r\n둘째 줄\r셋째 줄\n넷째 줄', 24)]
+    table = open_table("users")
+    try:
+        table.append_rows(rows)
+    finally:
+        table.close()
+    assert open_table("users").read_rows() == rows
 
 
-@TODO
 def test_s5_next_id(workspace):
-    """헤더만 → 1 / id 1, 2, 3 → 4 (B13)"""
+    write_table(workspace, "users", USERS_HEADER)
+    assert open_table("users").find_next_id() == 1
+    write_table(workspace, "users", "name:str,id:int\nyena,9\nkim,3\n")
+    assert open_table("users").find_next_id() == 4
 
 
-@TODO
 def test_s5b_next_id_when_last_row_has_newline(workspace):
-    """마지막 행 name에 줄바꿈 → 그 행 id + 1. 파일의 마지막 줄이 아니라 CSV 행 기준 (B13, B9)"""
+    write_table(workspace, "users", USERS_HEADER + '3,"첫줄\n둘째줄",24')
+    table = open_table("users")
+    try:
+        assert table.find_next_id() == 4
+        table.append_rows([(4, "kim", 20)])
+        assert table.read_rows() == [(3, "첫줄\n둘째줄", 24), (4, "kim", 20)]
+    finally:
+        table.close()
 
 
-@TODO
 def test_s6_read_sees_unflushed_rows(workspace):
-    """닫지 않은 Table에 append_rows 후 read_rows → 방금 쓴 행이 보임 (B14)"""
+    write_table(workspace, "users", USERS_HEADER)
+    table = open_table("users")
+    try:
+        table.append_rows([(1, "yena", 24)])
+        assert read_table(workspace, "users") == USERS_HEADER
+        assert table.find_next_id() == 2
+        assert table.read_rows() == [(1, "yena", 24)]
+
+        table.append_rows([(2, "kim", 20)])
+        assert table.find_next_id() == 3
+        assert read_table(workspace, "users") == USERS_HEADER + "1,yena,24\n"
+    finally:
+        table.close()
+    table.close()
+    assert open_table("users").read_rows() == [(1, "yena", 24), (2, "kim", 20)]

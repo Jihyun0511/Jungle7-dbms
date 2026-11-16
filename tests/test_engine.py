@@ -1,85 +1,160 @@
-"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12.
-
-Engine().execute(sql)의 Result와, 실행 뒤 파일 내용(read_table)을 같이 확인한다.
-작성한 테스트는 @TODO를 지운다.
-"""
+"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12."""
 
 import pytest
 
-from conftest import USERS_HEADER, read_table, write_table  # noqa: F401
-from minidb.engine import Engine  # noqa: F401
-from minidb.errors import SqlError  # noqa: F401
-
-TODO = pytest.mark.skip(reason="아직 작성하지 않음")
-
-
-@TODO
-def test_e1_ids_are_assigned(workspace):
-    """INSERT 두 번 → 파일에 1,yena,24 / 2,kim,20 (B13)"""
+from conftest import USERS_HEADER, read_table, write_table
+from minidb.engine import Engine, Result
+from minidb.errors import Position, SqlError
+from minidb.parser import parse_script
 
 
-@TODO
-def test_e2_user_given_id_is_error(workspace):
-    """VALUES (5, 'yena', 24), (id, name, age) VALUES (...) → SqlError,
-    파일은 헤더만 (B13)
-    """
+@pytest.fixture
+def engine(workspace):
+    write_table(workspace, "users", USERS_HEADER)
+    instance = Engine()
+    try:
+        yield instance
+    finally:
+        instance.close()
 
 
-@TODO
-def test_e3_value_count_mismatch(workspace):
-    """VALUES ('yena'), VALUES ('yena', 24, 'x'),
-    (name, age) VALUES ('yena') → SqlError (B6)
-    """
+def test_e1_ids_are_assigned(engine, workspace):
+    write_table(workspace, "staff", "name:str,id:int\njin,5\n")
+    assert engine.execute("INSERT INTO users VALUES ('yena', 24);") == Result(
+        kind="insert", affected=1,
+    )
+    assert engine.execute("INSERT INTO users VALUES ('kim', 20);").affected == 1
+    engine.execute("INSERT INTO staff VALUES ('park');")
+    engine.close()
+    assert read_table(workspace, "users") == (
+        USERS_HEADER + "1,yena,24\n2,kim,20\n"
+    )
+    assert read_table(workspace, "staff") == "name:str,id:int\njin,5\npark,6\n"
 
 
-@TODO
-def test_e4_strict_types(workspace):
-    """('yena', '24'), (24, 24) → SqlError / ('yena', -5) → 성공 (B10)"""
+@pytest.mark.parametrize(
+    "clause",
+    ["VALUES (5, 'yena', 24)", "(id, name, age) VALUES (5, 'yena', 24)"],
+)
+def test_e2_user_given_id_is_error(engine, workspace, clause):
+    with pytest.raises(SqlError):
+        engine.execute(f"INSERT INTO users {clause};")
+    engine.close()
+    assert read_table(workspace, "users") == USERS_HEADER
 
 
-@TODO
-def test_e5_column_list_errors(workspace):
-    """없는 컬럼, 같은 컬럼 두 번, age 빠짐 → SqlError /
-    (age, name) VALUES (24, 'yena') → 파일에 1,yena,24 (B6)
-    """
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "VALUES ('yena')",
+        "VALUES ('yena', 24, 'x')",
+        "(name, age) VALUES ('yena')",
+    ],
+)
+def test_e3_value_count_mismatch(engine, clause):
+    with pytest.raises(SqlError, match="값 개수 불일치"):
+        engine.execute(f"INSERT INTO users {clause};")
 
 
-@TODO
-def test_e6_bad_row_writes_nothing(workspace):
-    """('a', 1), ('b', 'x'), ('c', 3) → SqlError, 파일은 헤더만,
-    다음 INSERT의 id는 1 (B13, B17)
-    """
+def test_e4_strict_types(engine):
+    for row in ("('yena', '24')", "(24, 24)"):
+        with pytest.raises(SqlError, match="타입"):
+            engine.execute(f"INSERT INTO users VALUES {row};")
+    engine.execute("INSERT INTO users VALUES ('yena', -5);")
+    assert engine.execute("SELECT * FROM users;").rows == [(1, "yena", -5)]
 
 
-@TODO
-def test_e7_select_columns(workspace):
-    """SELECT name, age → [name, age] / SELECT age, id → 적힌 순서 /
-    SELECT nope → SqlError (B7)
-    """
+def test_e5_column_list_errors(engine, workspace):
+    for columns, message in (
+        ("name, nope", "컬럼 nope가 없음"),
+        ("name, NAME", "컬럼 name 중복"),
+        ("name", "컬럼 누락"),
+    ):
+        with pytest.raises(SqlError, match=message):
+            engine.execute(f"INSERT INTO users ({columns}) VALUES ('yena');")
+    engine.execute("INSERT INTO users (age, name) VALUES (24, 'yena');")
+    engine.close()
+    assert read_table(workspace, "users") == USERS_HEADER + "1,yena,24\n"
 
 
-@TODO
-def test_e8_where(workspace):
-    """id = 2 → kim / age = 24 → yena, Yena / name = 'yena' → yena만 /
-    name = 'park' → 0건 (B8, B5)
-    """
+def test_e6_bad_row_writes_nothing(engine, workspace):
+    with pytest.raises(SqlError, match="타입"):
+        engine.execute(
+            "INSERT INTO users VALUES ('a', 1), ('b', 'x'), ('c', 3);"
+        )
+    assert engine.execute("SELECT * FROM users;").rows == []
+    assert read_table(workspace, "users") == USERS_HEADER
+    engine.execute("INSERT INTO users VALUES ('d', 4);")
+    assert engine.execute("SELECT * FROM users;").rows == [(1, "d", 4)]
 
 
-@TODO
-def test_e9_where_unknown_column_is_error(workspace):
-    """WHERE nope = 1 → SqlError (0건 아님) (B8)"""
+def test_e6_execute_rejects_multiple_statements_before_writing(engine):
+    with pytest.raises(SqlError, match="정확히 하나"):
+        engine.execute(
+            "INSERT INTO users VALUES ('a', 1); SELECT * FROM users;"
+        )
+    assert engine.execute("SELECT * FROM users;").rows == []
+    with pytest.raises(SqlError, match="정확히 하나"):
+        engine.execute("-- comment only")
 
 
-@TODO
-def test_e10_missing_table_is_error(workspace):
-    """orders 없음: INSERT, SELECT 모두 SqlError, 파일도 생기지 않음 (B15)"""
+def test_e7_select_columns(engine):
+    engine.execute("INSERT INTO users VALUES ('yena', 24);")
+    assert engine.execute("SELECT name, age FROM users;") == Result(
+        kind="select", columns=["name", "age"], rows=[("yena", 24)],
+    )
+    assert engine.execute("SELECT age, id FROM users;") == Result(
+        kind="select", columns=["age", "id"], rows=[(24, 1)],
+    )
+    with pytest.raises(SqlError, match="컬럼 nope가 없음") as error:
+        engine.execute("SELECT nope FROM users;")
+    assert error.value.position == Position(1, 8)
 
 
-@TODO
-def test_e11_table_name_ignores_case(workspace):
-    """INSERT INTO Users 후 SELECT * FROM USERS → data/users.csv 하나만 씀 (B5)"""
+def test_e8_where(engine, capsys):
+    insert, select = parse_script(
+        "INSERT INTO users VALUES ('yena', 24), ('kim', 20), ('Yena', 24);"
+        "SELECT name FROM users WHERE id = 2;"
+    )
+    assert engine.run(insert).affected == 3
+    assert engine.run(select).rows == [("kim",)]
+    assert engine.execute("SELECT name FROM users WHERE age = 24;").rows == [
+        ("yena",), ("Yena",),
+    ]
+    matching = engine.execute("SELECT id FROM users WHERE name = 'yena';")
+    assert matching.rows == [(1,)]
+    empty = engine.execute("SELECT id FROM users WHERE name = 'park';")
+    assert empty == Result(kind="select", columns=["id"])
+    assert capsys.readouterr() == ("", "")
 
 
-@TODO
-def test_e12_where_type_mismatch_is_error(workspace):
-    """WHERE age = '24', WHERE name = 24 → SqlError (0건 아님) (B21)"""
+def test_e9_where_unknown_column_is_error(engine):
+    with pytest.raises(SqlError, match="컬럼 nope가 없음"):
+        engine.execute("SELECT * FROM users WHERE nope = 1;")
+
+
+@pytest.mark.parametrize(
+    ("sql", "position"),
+    [
+        ("INSERT INTO orders VALUES ('a', 1);", Position(1, 13)),
+        ("SELECT * FROM orders;", Position(1, 15)),
+    ],
+)
+def test_e10_missing_table_is_error(engine, workspace, sql, position):
+    with pytest.raises(SqlError, match="테이블 orders가 없음") as error:
+        engine.execute(sql)
+    assert error.value.position == position
+    assert not (workspace / "data/orders.csv").exists()
+
+
+def test_e11_table_name_ignores_case(engine, workspace):
+    engine.execute("INSERT INTO Users VALUES ('Yena', 24);")
+    assert engine.execute("SELECT NAME FROM USERS;").rows == [("Yena",)]
+    files = (workspace / "data").iterdir()
+    assert [path.name for path in files] == ["users.csv"]
+
+
+@pytest.mark.parametrize("condition", ["age = '24'", "name = 24"])
+def test_e12_where_type_mismatch_is_error(engine, condition):
+    with pytest.raises(SqlError, match="타입"):
+        engine.execute(f"SELECT * FROM users WHERE {condition};")

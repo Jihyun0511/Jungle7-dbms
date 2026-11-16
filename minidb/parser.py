@@ -14,9 +14,14 @@
 담당: (이름)
 """
 
-from minidb.errors import SqlError  # noqa: F401  (구현할 때 사용)
-from minidb.statements import Statement
-from minidb.tokenizer import Token, tokenize  # noqa: F401
+from collections.abc import Callable, Iterable
+from typing import TypeVar, cast
+
+from minidb.errors import SqlError
+from minidb.statements import Insert, Name, Select, Statement, Value, Where
+from minidb.tokenizer import Token, TokenType, iter_tokens
+
+_Item = TypeVar("_Item")
 
 
 def parse_script(text: str) -> list[Statement]:
@@ -24,9 +29,102 @@ def parse_script(text: str) -> list[Statement]:
 
     SqlError를 던질 때 statement(몇 번째 문장인지)를 채운다.
     """
-    raise NotImplementedError
+    return _parse_script_tokens(iter_tokens(text))
 
 
 def parse(tokens: list[Token]) -> list[Statement]:
     """토큰 목록(마지막은 EOF)을 문장 목록으로 바꾼다."""
-    raise NotImplementedError
+    return _parse_script_tokens(tokens)
+
+
+def _parse_script_tokens(tokens: Iterable[Token]) -> list[Statement]:
+    statements = []
+    current = []
+    try:
+        for token in tokens:
+            current.append(token)
+            if token.type in (TokenType.SEMICOLON, TokenType.EOF):
+                if len(current) > 1:
+                    statements.append(_StatementParser(current).parse())
+                current = []
+    except SqlError as error:
+        error.statement = len(statements) + 1
+        raise
+    return statements
+
+
+class _StatementParser:
+    def __init__(self, tokens: list[Token]):
+        self.tokens = tokens
+        self.index = 0
+
+    @property
+    def current(self) -> Token:
+        return self.tokens[self.index]
+
+    def _take(self, kind: TokenType, value: str | None = None) -> Token | None:
+        token = self.current
+        if token.type == kind and (value is None or token.value == value):
+            self.index += 1
+            return token
+        return None
+
+    def _expect(self, kind: TokenType, label: str, value: str | None = None) -> Token:
+        token = self._take(kind, value)
+        if token is None:
+            raise SqlError(f"{label} 필요", self.current.position)
+        return token
+
+    def _name(self) -> Name:
+        token = self._expect(TokenType.NAME, "테이블 또는 컬럼 이름")
+        return Name(cast(str, token.value), token.position)
+
+    def _value(self) -> Value:
+        token = self.current
+        if token.type in (TokenType.INTEGER, TokenType.STRING):
+            self.index += 1
+            return Value(cast(int | str, token.value), token.position)
+        raise SqlError("정수 또는 문자열 값 필요", token.position)
+
+    def _comma_list(self, read_item: Callable[[], _Item]) -> list[_Item]:
+        items = [read_item()]
+        while self._take(TokenType.COMMA):
+            items.append(read_item())
+        return items
+
+    def _row(self) -> list[Value]:
+        self._expect(TokenType.LPAREN, "'('")
+        values = self._comma_list(self._value)
+        self._expect(TokenType.RPAREN, "')'")
+        return values
+
+    def _insert(self) -> Insert:
+        self._expect(TokenType.KEYWORD, "INTO", "INTO")
+        table = self._name()
+        columns = None
+        if self._take(TokenType.LPAREN):
+            columns = self._comma_list(self._name)
+            self._expect(TokenType.RPAREN, "')'")
+        self._expect(TokenType.KEYWORD, "VALUES", "VALUES")
+        return Insert(table, columns, self._comma_list(self._row))
+
+    def _select(self) -> Select:
+        columns = None if self._take(TokenType.STAR) else self._comma_list(self._name)
+        self._expect(TokenType.KEYWORD, "FROM", "FROM")
+        table = self._name()
+        where = None
+        if self._take(TokenType.KEYWORD, "WHERE"):
+            column = self._name()
+            self._expect(TokenType.EQUALS, "'='")
+            where = Where(column, self._value())
+        return Select(columns, table, where)
+
+    def parse(self) -> Statement:
+        if self._take(TokenType.KEYWORD, "INSERT"):
+            statement = self._insert()
+        elif self._take(TokenType.KEYWORD, "SELECT"):
+            statement = self._select()
+        else:
+            raise SqlError("INSERT 또는 SELECT 필요", self.current.position)
+        self._expect(TokenType.SEMICOLON, "';'")
+        return statement

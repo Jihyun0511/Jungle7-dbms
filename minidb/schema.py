@@ -11,7 +11,7 @@
 
 from dataclasses import dataclass
 
-from minidb.errors import SqlError  # noqa: F401  (구현할 때 사용)
+from minidb.errors import SqlError
 
 TYPES = {"int": int, "str": str}
 
@@ -29,16 +29,19 @@ class Schema:
     @property
     def names(self) -> list[str]:
         """헤더 순서대로 컬럼 이름."""
-        raise NotImplementedError
+        return [column.name for column in self.columns]
 
     def find(self, name: str) -> int | None:
         """컬럼 위치(0부터). 없으면 None."""
-        raise NotImplementedError
+        for index, column in enumerate(self.columns):
+            if column.name == name:
+                return index
+        return None
 
     @property
     def value_columns(self) -> list[Column]:
         """id를 뺀 컬럼. 컬럼 목록 없는 INSERT가 값을 받는 순서 (B6)."""
-        raise NotImplementedError
+        return [column for column in self.columns if column.name != "id"]
 
 
 def parse_header(fields: list[str], file_name: str) -> Schema:
@@ -46,4 +49,32 @@ def parse_header(fields: list[str], file_name: str) -> Schema:
 
     file_name: 에러 메시지용 ('users.csv 헤더 3번째 컬럼: 모르는 타입 float')
     """
-    raise NotImplementedError
+    if not fields:
+        raise SqlError(f"{file_name} 헤더가 비어 있음")
+
+    columns = []
+    names = set()
+    for index, field in enumerate(fields, start=1):
+        location = f"{file_name} 헤더 {index}번째 컬럼"
+        name, _, type_name = field.partition(":")
+        name = name.strip().lower()
+        type_name = type_name.strip()
+        if not type_name:
+            raise SqlError(f"{location}: 타입 없음")
+        column_type = TYPES.get(type_name)
+        if column_type is None:
+            raise SqlError(f"{location}: 모르는 타입 {type_name}")
+        if name in names:
+            raise SqlError(f"{location}: 이름 중복 {name}")
+        if not name:
+            raise SqlError(f"{location}: 이름 없음")
+        columns.append(Column(name, column_type))
+        names.add(name)
+
+    schema = Schema(columns)
+    id_index = schema.find("id")
+    if id_index is None:
+        raise SqlError(f"{file_name} 헤더에 id 컬럼 없음")
+    if columns[id_index].type is not int:
+        raise SqlError(f"{file_name} 헤더의 id 컬럼은 int여야 함")
+    return schema

@@ -15,10 +15,11 @@
 
 from dataclasses import dataclass, field
 
-from minidb.errors import SqlError  # noqa: F401  (구현할 때 사용)
-from minidb.parser import parse_script  # noqa: F401
-from minidb.statements import Insert, Select, Statement  # noqa: F401
-from minidb.storage import Row, Table, open_table  # noqa: F401
+from minidb.errors import SqlError
+from minidb.parser import parse_script
+from minidb.schema import Column, Schema
+from minidb.statements import Insert, Name, Select, Statement, Value
+from minidb.storage import Row, Table, open_table
 
 
 @dataclass
@@ -37,19 +38,152 @@ class Result:
 
 
 class Engine:
-    """열린 테이블을 들고 있다가 문장을 실행한다. 다 쓰면 close()를 꼭 부른다 (B14)."""
+    """문장을 실행하고 테이블을 보관한다. 다 쓰면 close()를 부른다 (B14)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.tables: dict[str, Table] = {}
 
     def execute(self, sql: str) -> Result:
-        """SQL 한 문장을 실행한다. 문장이 정확히 하나가 아니면 SqlError. (단위 테스트용)"""
-        raise NotImplementedError
+        """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
+        statements = parse_script(sql)
+        if len(statements) != 1:
+            raise SqlError("SQL 문장이 정확히 하나 필요")
+        return self.run(statements[0])
 
     def run(self, statement: Statement) -> Result:
         """파싱된 문장 하나를 실행한다. CLI는 이걸 문장마다 부른다."""
-        raise NotImplementedError
+        try:
+            table = self._get_table(statement.table.text)
+            if isinstance(statement, Insert):
+                return _insert(table, statement)
+            return _select(table, statement)
+        except SqlError as error:
+            if error.position is None and isinstance(
+                error.__cause__, FileNotFoundError
+            ):
+                error.position = statement.table.position
+            raise
 
     def close(self) -> None:
         """열린 테이블을 모두 닫는다 (버퍼 flush 포함)."""
-        raise NotImplementedError
+        first_error = None
+        for table in self.tables.values():
+            try:
+                table.close()
+            except SqlError as error:
+                if first_error is None:
+                    first_error = error
+        self.tables.clear()
+        if first_error is not None:
+            raise first_error
+
+    def _get_table(self, name: str) -> Table:
+        table = self.tables.get(name)
+        if table is None:
+            table = open_table(name)
+            self.tables[name] = table
+        return table
+
+
+def _insert(table: Table, statement: Insert) -> Result:
+    schema = table.schema
+    column_indices = _insert_column_indices(schema, statement)
+    rows = [
+        _check_insert_row(schema, column_indices, values, statement.table)
+        for values in statement.rows
+    ]
+
+    id_index = schema.find("id")
+    assert id_index is not None
+    next_id = table.find_next_id()
+    for row_id, row in enumerate(rows, start=next_id):
+        row[id_index] = row_id
+    table.append_rows([tuple(row) for row in rows])
+    return Result(kind="insert", affected=len(rows))
+
+
+def _insert_column_indices(schema: Schema, statement: Insert) -> list[int]:
+    if statement.columns is None:
+        return [
+            index for index, column in enumerate(schema.columns)
+            if column.name != "id"
+        ]
+
+    indices = []
+    seen_names = set()
+    for name in statement.columns:
+        if name.text == "id":
+            raise SqlError("id는 자동으로 부여하는 컬럼", name.position)
+        if name.text in seen_names:
+            raise SqlError(f"컬럼 {name.text} 중복", name.position)
+        indices.append(_find_column(schema, name))
+        seen_names.add(name.text)
+
+    missing = [
+        column.name for column in schema.value_columns
+        if column.name not in seen_names
+    ]
+    if missing:
+        names = ", ".join(missing)
+        raise SqlError(f"INSERT 컬럼 누락 ({names})", statement.table.position)
+    return indices
+
+
+def _check_insert_row(
+    schema: Schema, indices: list[int], values: list[Value], table: Name,
+) -> list[int | str]:
+    if len(values) != len(indices):
+        position = values[0].position if values else table.position
+        raise SqlError(
+            f"INSERT 값 개수 불일치 (필요 {len(indices)}개, 입력 {len(values)}개)",
+            position,
+        )
+
+    row: list[int | str] = [0] * len(schema.columns)
+    for index, value in zip(indices, values):
+        row[index] = _check_value(schema.columns[index], value)
+    return row
+
+
+def _select(table: Table, statement: Select) -> Result:
+    schema = table.schema
+    if statement.columns is None:
+        indices = list(range(len(schema.columns)))
+    else:
+        indices = [_find_column(schema, name) for name in statement.columns]
+
+    where_index = None
+    where_value = None
+    if statement.where is not None:
+        where_index = _find_column(schema, statement.where.column)
+        where_value = _check_value(
+            schema.columns[where_index], statement.where.value,
+        )
+
+    rows = [
+        tuple(row[index] for index in indices)
+        for row in table.read_rows()
+        if where_index is None or row[where_index] == where_value
+    ]
+    return Result(
+        kind="select", columns=[schema.columns[i].name for i in indices],
+        rows=rows,
+    )
+
+
+def _find_column(schema: Schema, name: Name) -> int:
+    index = schema.find(name.text)
+    if index is None:
+        raise SqlError(f"컬럼 {name.text}가 없음", name.position)
+    return index
+
+
+def _check_value(column: Column, value: Value) -> int | str:
+    if type(value.value) is not column.type:
+        expected = column.type.__name__
+        actual = type(value.value).__name__
+        raise SqlError(
+            f"컬럼 {column.name}은 {expected} 타입, 입력값은 {actual} 타입",
+            value.position,
+        )
+    return value.value

@@ -13,20 +13,80 @@
 담당: (이름)
 """
 
-import sys  # noqa: F401  (구현할 때 사용)
+import csv
+import sys
+from io import StringIO
+from pathlib import Path
 
-from minidb.engine import Engine, Result  # noqa: F401
-from minidb.errors import SqlError  # noqa: F401
-from minidb.parser import parse_script  # noqa: F401
+from minidb.engine import Engine, Result
+from minidb.errors import SqlError
+from minidb.parser import parse_script
+from minidb.statements import Statement
 
 USAGE = "usage: python sql_processor.py <file.sql>"
 
 
 def main(argv: list[str]) -> int:
     """argv: 프로그램 이름을 뺀 인자 목록. 종료 코드를 돌려준다."""
-    raise NotImplementedError
+    if len(argv) != 1:
+        print(USAGE, file=sys.stderr)
+        return 1
+
+    try:
+        with Path(argv[0]).open(encoding="utf-8", newline="") as file:
+            text = file.read()
+    except (OSError, ValueError):
+        print(f"error: {argv[0]} 파일을 열 수 없음", file=sys.stderr)
+        return 1
+
+    try:
+        statements = parse_script(text)
+        _execute_statements(statements)
+    except SqlError as error:
+        print(error.format(), file=sys.stderr)
+        return 1
+    return 0
 
 
 def format_result(result: Result) -> str:
     """결과 하나를 출력할 문자열로 바꾼다. 끝에 줄바꿈 포함."""
-    raise NotImplementedError
+    if result.kind == "insert":
+        unit = "row" if result.affected == 1 else "rows"
+        return f"{result.affected} {unit} affected\n"
+
+    output = StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(result.columns)
+    writer.writerows(
+        [_format_value(value) for value in row] for row in result.rows
+    )
+    if not result.rows:
+        output.write("(0 rows)\n")
+    return output.getvalue()
+
+
+def _execute_statements(statements: list[Statement]) -> None:
+    engine = Engine()
+    failure = None
+    try:
+        for number, statement in enumerate(statements, start=1):
+            result = engine.run(statement)
+            sys.stdout.write(format_result(result))
+    except SqlError as error:
+        error.statement = number
+        failure = error
+    finally:
+        try:
+            engine.close()
+        except SqlError:
+            if failure is None:
+                raise
+    if failure is not None:
+        raise failure
+
+
+def _format_value(value: int | str) -> int | str:
+    if isinstance(value, str):
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.replace("\n", r"\n")
+    return value
