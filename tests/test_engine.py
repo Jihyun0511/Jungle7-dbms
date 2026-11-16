@@ -1,7 +1,8 @@
-"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12, Phase 2 e13~e16."""
+"""엔진 단위 테스트 (R-Q1). 노션 5절 e1~e12, Phase 2 e13~e18."""
 
 import pytest
 
+import minidb.storage
 from conftest import USERS_HEADER, read_table, write_table
 from minidb.engine import Engine, Result
 from minidb.errors import Position, SqlError
@@ -203,6 +204,40 @@ def test_e16_where_id_sees_rows_inserted_after_tree(engine, monkeypatch):
     ]
     engine.execute("INSERT INTO users VALUES ('kim', 20), ('park', 22);")
     monkeypatch.setattr(engine.tables["users"], "read_rows", _fail_scan)
+    assert engine.execute("SELECT name FROM users WHERE id = 3;").rows == [
+        ("park",),
+    ]
+
+
+def test_e17_failed_write_keeps_row_out_of_tree(engine, monkeypatch):
+    assert engine.execute("SELECT * FROM users WHERE id = 1;").rows == []
+
+    def reject_open(path):
+        raise PermissionError(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(minidb.storage, "_open_append_file", reject_open)
+        with pytest.raises(SqlError, match="cannot write rows"):
+            engine.execute("INSERT INTO users VALUES ('kim', 20);")
+    assert engine.execute("SELECT * FROM users WHERE id = 1;").rows == []
+
+    engine.execute("INSERT INTO users VALUES ('park', 26);")
+    assert engine.execute("SELECT name FROM users WHERE id = 1;").rows == [
+        ("park",),
+    ]
+
+
+def test_e18_where_id_after_close_rebuilds_tree(engine):
+    engine.execute("INSERT INTO users VALUES ('yena', 24), ('kim', 20);")
+    assert engine.execute("SELECT name FROM users WHERE id = 2;").rows == [
+        ("kim",),
+    ]
+    engine.close()
+    assert engine.tables == {}
+    assert engine.execute("SELECT name FROM users WHERE id = 2;").rows == [
+        ("kim",),
+    ]
+    engine.execute("INSERT INTO users VALUES ('park', 22);")
     assert engine.execute("SELECT name FROM users WHERE id = 3;").rows == [
         ("park",),
     ]

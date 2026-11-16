@@ -78,6 +78,21 @@ class BPlusTree:
             yield from zip(leaf.keys, leaf.values)
             leaf = leaf.next
 
+    def has_valid_structure(self) -> bool:
+        """테스트용: B+ 트리 규칙을 모두 지키면 참.
+
+        노드 안 키 정렬, 노드마다 키 개수 범위, 구분 키와 자식 키의 범위,
+        모든 잎의 깊이가 같음, 잎 연결 순서와 전체 키 개수를 본다.
+        """
+        checker = _StructureChecker(self.order)
+        if not checker.is_valid(self._root, None, None, 1, is_root=True):
+            return False
+        if len(checker.leaf_depths) != 1:
+            return False
+        keys = [key for key, _ in self.items()]
+        is_increasing = all(left < right for left, right in zip(keys, keys[1:]))
+        return is_increasing and len(keys) == self._size
+
     def _find_leaf(self, key: int) -> "_Leaf":
         node = self._root
         while isinstance(node, _Internal):
@@ -163,3 +178,45 @@ def _split_internal(node: _Internal) -> _Split:
     del node.keys[middle:]
     del node.children[middle + 1:]
     return separator, right
+
+
+class _StructureChecker:
+    """has_valid_structure용. 노드를 내려가며 잎의 깊이를 모은다."""
+
+    def __init__(self, order: int) -> None:
+        self.max_keys = order - 1
+        # 뿌리가 아닌 노드는 나뉜 뒤에도 키가 ceil(order / 2) - 1개 이상이다.
+        self.min_keys = (order + 1) // 2 - 1
+        self.leaf_depths: set[int] = set()
+
+    def is_valid(self, node: "_Leaf | _Internal", low: int | None,
+                 high: int | None, depth: int, is_root: bool) -> bool:
+        """node의 키가 모두 low 이상, high 미만인지까지 본다."""
+        if not self._has_valid_keys(node.keys, low, high, is_root):
+            return False
+        if isinstance(node, _Leaf):
+            self.leaf_depths.add(depth)
+            return len(node.values) == len(node.keys)
+        return self._has_valid_children(node, low, high, depth)
+
+    def _has_valid_keys(self, keys: list[int], low: int | None,
+                        high: int | None, is_root: bool) -> bool:
+        if any(left >= right for left, right in zip(keys, keys[1:])):
+            return False
+        if len(keys) > self.max_keys:
+            return False
+        if not is_root and len(keys) < self.min_keys:
+            return False
+        if keys and low is not None and keys[0] < low:
+            return False
+        return not (keys and high is not None and keys[-1] >= high)
+
+    def _has_valid_children(self, node: _Internal, low: int | None,
+                            high: int | None, depth: int) -> bool:
+        if not node.keys or len(node.children) != len(node.keys) + 1:
+            return False
+        bounds = [low, *node.keys, high]
+        return all(
+            self.is_valid(child, bounds[i], bounds[i + 1], depth + 1, False)
+            for i, child in enumerate(node.children)
+        )

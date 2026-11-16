@@ -24,6 +24,8 @@ SQL 문법과 실행 방법은 Phase 1 그대로다. `WHERE id = ?`만 파일을
 - 트리(`minidb/bptree.py`)는 메모리에 있고, `id → 그 행이 CSV에서 시작하는 바이트 위치`를 담는다. 찾으면 그 위치로 `seek`해서 행 하나만 읽는다. 테이블 파일 형식은 바꾸지 않았다.
 - 노드 하나 = 페이지 하나. 기본 order는 255(4KB ÷ (키 8B + 포인터 8B))이고, 노드 안은 `bisect`(이진 탐색)로 찾는다.
 - 트리는 그 테이블에서 `WHERE id`를 처음 실행할 때 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고, 트리가 이미 있을 때만 쓴 행을 바로 등록한다.
+- 트리를 만들 때 따옴표가 없는 행은 csv 해석 없이 쉼표로 잘라 id를 꺼낸다. 따옴표가 없으면 값 안에 쉼표·줄바꿈이 없어서 결과가 같다. 100만 행에서 약 4.3초 → 2.2초.
+- 같은 id는 에러다. 파일에 같은 id가 있으면 `users.csv data row 3: duplicate id 1`, 새 id가 트리에 이미 있으면 쓰기 전에 `id 5 already exists in users`.
 - 다음 id는 Phase 1(B13)과 같다. 처음 필요할 때 파일을 훑어 찾고 기억한다.
 
 ### 대용량 데이터 넣기
@@ -53,10 +55,10 @@ tests/
   conftest.py            workspace, write_table, run_cli (공용, 완성)
   test_tokenizer.py      u1~u12
   test_parser.py         p1~p8
-  test_storage.py        s1~s6, s7~s10 (Phase 2)
-  test_engine.py         e1~e12, e13~e16 (Phase 2)
+  test_storage.py        s1~s6, s7~s12 (Phase 2)
+  test_engine.py         e1~e12, e13~e18 (Phase 2)
   test_cli.py            c1~c10, c11 (Phase 2)
-  test_bptree.py         b1~b7 (Phase 2)
+  test_bptree.py         b1~b10 (Phase 2)
   test_make_insert_sql.py g1 (Phase 2)
 data/users.csv           예시 테이블 (헤더만)
 make_insert_sql.py       대용량 INSERT SQL 생성 (Phase 2)

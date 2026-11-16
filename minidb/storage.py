@@ -163,18 +163,19 @@ class Table:
             return self._index
         index = BPlusTree()
         last_id = None
-        for number, (offset, fields) in enumerate(
+        for number, (offset, record) in enumerate(
             _scan_records(self.path), start=1,
         ):
-            last_id = self._read_row_id(fields, number)
-            self._register_id(index, last_id, offset)
+            last_id = self._read_row_id(record, number)
+            self._register_id(index, last_id, offset, number)
         self._index = index
         # 다음 id(B13)를 아직 몰랐다면 같은 훑기에서 얻은 값을 쓴다.
         if self._next_id is None:
             self._next_id = 1 if last_id is None else last_id + 1
         return index
 
-    def _read_row_id(self, fields: list[str], number: int) -> int:
+    def _read_row_id(self, record: bytes, number: int) -> int:
+        fields = _split_record(record, self.path)
         try:
             return int(fields[self._id_index])
         except (IndexError, ValueError) as error:
@@ -182,13 +183,13 @@ class Table:
                 f"{self.path.name} data row {number} has an invalid id"
             ) from error
 
-    def _register_id(self, index: BPlusTree, row_id: int,
-                     offset: int) -> None:
+    def _register_id(self, index: BPlusTree, row_id: int, offset: int,
+                     number: int) -> None:
         try:
             index.insert(row_id, offset)
         except ValueError as error:
             raise SqlError(
-                f"{self.path.name} has duplicate id {row_id}"
+                f"{self.path.name} data row {number}: duplicate id {row_id}"
             ) from error
 
     def _check_new_ids(self, row_ids: list[int]) -> None:
@@ -278,8 +279,8 @@ def _read_record(file: BufferedReader) -> bytes:
     return record
 
 
-def _scan_records(path: Path) -> Iterator[tuple[int, list[str]]]:
-    """헤더를 뺀 행마다 (시작 바이트 위치, 필드)."""
+def _scan_records(path: Path) -> Iterator[tuple[int, bytes]]:
+    """헤더를 뺀 행마다 (시작 바이트 위치, 행의 바이트)."""
     with _open_binary(path) as file:
         _read_record(file)
         while True:
@@ -287,7 +288,21 @@ def _scan_records(path: Path) -> Iterator[tuple[int, list[str]]]:
             record = _read_record(file)
             if not record:
                 return
-            yield offset, _parse_record(record, path)
+            yield offset, record
+
+
+def _split_record(record: bytes, path: Path) -> list[bytes] | list[str]:
+    """트리를 만들 때 id 칸만 꺼내려고 행을 칸으로 나눈다.
+
+    따옴표가 없는 행은 csv 해석 없이 쉼표로 자른다. csv.writer는 쉼표·따옴표·
+    줄바꿈이 든 값을 꼭 따옴표로 감싸므로, 따옴표가 없으면 쉼표가 곧 칸
+    구분이고 결과가 csv 해석과 같다 (s12). 행마다 csv 해석기를 만드는
+    비용을 줄이려는 것이다. 이 길에서는 id 칸 말고는 utf-8 검사를 하지
+    않으므로, 다른 칸의 깨진 글자는 그 행을 읽을 때 에러가 난다.
+    """
+    if _QUOTE not in record:
+        return record.rstrip(b"\r\n").split(b",")
+    return _parse_record(record, path)
 
 
 def _encode_row(row: Row, path: Path) -> bytes:

@@ -1,4 +1,4 @@
-"""저장(CSV)·스키마 단위 테스트 (R-Q1). 노션 5절 s1~s6, Phase 2 s7~s10."""
+"""저장(CSV)·스키마 단위 테스트 (R-Q1). 노션 5절 s1~s6, Phase 2 s7~s12."""
 
 import pytest
 
@@ -161,8 +161,9 @@ def test_s9_insert_after_tree_is_registered(workspace, built_trees):
 
 def test_s10_duplicate_ids(workspace):
     write_table(workspace, "users", USERS_HEADER + "1,a,1\n2,b,2\n1,c,3\n")
-    with pytest.raises(SqlError, match="users.csv has duplicate id 1"):
+    with pytest.raises(SqlError) as error:
         open_table("users").find_row_by_id(2)
+    assert error.value.message == "users.csv data row 3: duplicate id 1"
 
     # 마지막 행 id + 1 (B13)이 앞 행의 id와 겹치는 파일
     text = USERS_HEADER + "1,a,1\n5,b,2\n4,c,3\n"
@@ -176,3 +177,41 @@ def test_s10_duplicate_ids(workspace):
     finally:
         table.close()
     assert read_table(workspace, "users") == text
+
+
+def test_s11_id_not_first_column(workspace):
+    write_table(
+        workspace, "staff",
+        "name:str,id:int,age:int\nyena,4,24\n\"kim, jr\",9,20\npark,2,22\n",
+    )
+    table = open_table("staff")
+    assert table.find_row_by_id(9) == ("kim, jr", 9, 20)
+    assert table.find_row_by_id(2) == ("park", 2, 22)
+    assert table.find_row_by_id(3) is None
+    assert table.find_next_id() == 3
+
+
+def test_s12_quick_split_matches_csv(workspace):
+    """따옴표 없는 행은 쉼표로 바로 자른다. 섞인 파일에서도 결과가 같아야 한다."""
+    write_table(
+        workspace, "items",
+        "name:str,note:str,id:int\n"
+        "a,plain,1\r\n"
+        '"b, c","say ""hi""",2\r\n'
+        'd,"첫줄\n둘째줄",3\r\n'
+        ",,4\r\n"
+        "한글,값,5\r\n"
+        '"",x,6',
+    )
+    table = open_table("items")
+    rows = table.read_rows()
+    assert [row[2] for row in rows] == [1, 2, 3, 4, 5, 6]
+    assert [table.find_row_by_id(row[2]) for row in rows] == rows
+    assert table.find_next_id() == 7
+
+
+def test_s12_invalid_id_is_error_on_both_paths(workspace):
+    for line in ("x,1,abc\n", '"x",1,abc\n', "x,1\n"):
+        write_table(workspace, "items", "name:str,age:int,id:int\n" + line)
+        with pytest.raises(SqlError, match="data row 1 has an invalid id"):
+            open_table("items").find_row_by_id(1)
