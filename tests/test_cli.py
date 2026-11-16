@@ -1,4 +1,4 @@
-"""CLI 기능 테스트 (R-Q2). 노션 5절 c1~c10.
+"""CLI 기능 테스트 (R-Q2). 노션 5절 c1~c10, Phase 2 c11.
 
 run_cli로 sql_processor.py를 진짜 프로세스로 실행하고 stdout, stderr, 종료 코드,
 실행 뒤 파일 내용을 확인한다. 에러 메시지는 포함 여부로 확인한다 (B22).
@@ -129,4 +129,28 @@ def test_c10_utf8_bom_is_ignored(tmp_path):
     result = run_cli(tmp_path, "﻿INSERT INTO users VALUES ('yena', 24);")
     assert result.returncode == 0
     assert result.stdout == "1 row affected\n"
+    assert result.stderr == ""
+
+
+def test_c11_where_id(tmp_path):
+    """Phase 2: 파일에 있던 행, 트리 전에 넣은 행, 트리 뒤에 넣은 행."""
+    write_table(tmp_path, "users", USERS_HEADER + '1,"a\nb",24\n')
+    result = run_cli(
+        tmp_path,
+        "INSERT INTO users VALUES ('kim', 20);\n"
+        "SELECT * FROM users WHERE id = 1;\n"
+        "SELECT name FROM users WHERE id = 2;\n"
+        "INSERT INTO users VALUES ('park', 22);\n"
+        "SELECT name FROM users WHERE id = 3;\n"
+        "SELECT name FROM users WHERE id = 4;",
+    )
+    assert result.returncode == 0
+    assert result.stdout == (
+        "1 row affected\n"
+        "id,name,age\n1,a\\nb,24\n"
+        "name\nkim\n"
+        "1 row affected\n"
+        "name\npark\n"
+        "name\n(0 rows)\n"
+    )
     assert result.stderr == ""
