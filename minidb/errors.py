@@ -26,12 +26,15 @@ class SqlError(Exception):
         self.statement = statement
 
     def format(self) -> str:
-        """예: 'error: 2번째 문장 (2줄 33칸): age는 int인데 문자열 'abc'가 들어옴'"""
+        """예: "error: statement 2 (line 2, column 33): age is int but got
+        string 'abc'"
+        """
         where = []
         if self.statement is not None:
-            where.append(f"{self.statement}번째 문장")
+            where.append(f"statement {self.statement}")
         if self.position is not None:
-            where.append(f"({self.position.line}줄 {self.position.column}칸)")
+            line, column = self.position.line, self.position.column
+            where.append(f"(line {line}, column {column})")
         if not where:
             return f"error: {self.message}"
         return f"error: {' '.join(where)}: {self.message}"
