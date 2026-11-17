@@ -21,9 +21,12 @@ v14 여러 클라이언트가 동시에 INSERT해도 id가 겹치지 않음 (B23
 
 import http.client
 import json
+import signal
+import socket
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -135,6 +138,21 @@ def test_v5_unknown_path_and_method(start_server):
     assert payload == {"error": "method GET not allowed"}
     assert headers["Allow"] == "POST"
 
+    status, payload, headers = request(server, "ignored", method="OPTIONS")
+    assert status == 405
+    assert payload == {"error": "method OPTIONS not allowed"}
+    assert headers["Allow"] == "POST"
+
+    connection = http.client.HTTPConnection(*server.server_address)
+    try:
+        connection.request("HEAD", "/query")
+        response = connection.getresponse()
+        assert response.status == 405
+        assert response.getheader("Allow") == "POST"
+        assert response.read() == b""
+    finally:
+        connection.close()
+
 
 def test_v6_ignores_content_type(start_server):
     server = _start_with_users(start_server)
@@ -155,6 +173,35 @@ def test_v7_reads_utf8_with_bom(start_server):
     status, payload, _ = request(server, "SELECT '예나';".encode("cp949"))
     assert status == 400
     assert payload == {"error": "expected UTF-8 request body"}
+
+
+@pytest.mark.parametrize("length", ["bad", "-1", str(sys.maxsize + 1)])
+def test_v7_rejects_invalid_content_length(start_server, length):
+    server = _start_with_users(start_server)
+    status, payload, _ = request(server, headers={"Content-Length": length})
+    assert status == 400
+    assert "Content-Length" in payload["error"]
+
+
+def test_v7_truncated_body_does_not_execute_complete_sql_prefix(start_server):
+    server = _start_with_users(start_server)
+    body = b"INSERT INTO users VALUES ('partial', 24);"
+    connection = http.client.HTTPConnection(*server.server_address)
+    try:
+        connection.request(
+            "POST", "/query", body=body,
+            headers={"Content-Length": str(len(body) + 20)},
+        )
+        connection.sock.shutdown(socket.SHUT_WR)
+        response = connection.getresponse()
+        assert response.status == 400
+        assert json.loads(response.read()) == {
+            "error": "incomplete request body",
+        }
+    finally:
+        connection.close()
+    _, payload, _ = request(server, "SELECT * FROM users;")
+    assert payload["results"][0]["rows"] == []
 
 
 def test_v8_server_bug_hides_details(start_server, capfd):
@@ -197,6 +244,18 @@ def test_v10_queued_requests_get_503_on_stop(start_server):
     assert queued.result[:2] == (503, {"error": "server shutting down"})
 
 
+def test_v10_worker_already_started_can_finish_after_stop(start_server):
+    server = start_server(server_class=_PausedWorkerServer, workers=1)
+    with ThreadPoolExecutor(max_workers=1) as client:
+        active = client.submit(request, server)
+        try:
+            assert server.worker_started.wait(TIMEOUT)
+            server.request_stop()
+        finally:
+            server.release_worker.set()
+        assert active.result(timeout=TIMEOUT)[:2] == (200, {"results": []})
+
+
 def test_v11_shutdown_only_from_localhost(start_server):
     server = start_server(server_class=_RemoteClientServer)
     status, payload, _ = request(server, path="/shutdown")
@@ -214,6 +273,22 @@ def test_v12_shutdown_flushes_and_exits(workspace):
             == 200
         status, payload, _ = request(server, path="/shutdown")
         assert (status, payload) == (200, {"message": "shutting down"})
+        assert process.wait(TIMEOUT) == 0
+    finally:
+        process.kill()
+        process.communicate()
+    assert read_table(workspace, "users") == USERS_HEADER + "1,yena,24\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX SIGINT test")
+def test_v12_ctrl_c_flushes_and_exits(workspace):
+    write_table(workspace, "users", USERS_HEADER)
+    process = _run_server_process(workspace)
+    try:
+        server = _ProcessAddress(process.stdout.readline())
+        assert request(server, "INSERT INTO users VALUES ('yena', 24);")[0] \
+            == 200
+        process.send_signal(signal.SIGINT)
         assert process.wait(TIMEOUT) == 0
     finally:
         process.kill()
@@ -281,6 +356,18 @@ class _BlockingEngine:
 class _RemoteClientServer(SqlServer):
     def finish_request(self, request, client_address):
         self.RequestHandlerClass(request, ("10.0.0.5", 50000), self)
+
+
+class _PausedWorkerServer(SqlServer):
+    def __init__(self, *args, **kwargs):
+        self.worker_started = threading.Event()
+        self.release_worker = threading.Event()
+        super().__init__(*args, **kwargs)
+
+    def finish_request(self, request, client_address):
+        self.worker_started.set()
+        assert self.release_worker.wait(TIMEOUT)
+        super().finish_request(request, client_address)
 
 
 class _BackgroundRequest(threading.Thread):
