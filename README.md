@@ -25,7 +25,7 @@ SQL 문법과 실행 방법은 Phase 1 그대로다. `WHERE id = ?`만 파일을
 - 노드 하나 = 페이지 하나. 기본 order는 255(4KB ÷ (키 8B + 포인터 8B))이고, 노드 안은 `bisect`(이진 탐색)로 찾는다.
 - 트리는 그 테이블에서 `WHERE id`를 처음 실행할 때 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고, 트리가 이미 있을 때만 쓴 행을 바로 등록한다.
 - 트리를 만들 때 따옴표가 없는 행은 csv 해석 없이 쉼표로 잘라 id를 꺼낸다. 따옴표가 없으면 값 안에 쉼표·줄바꿈이 없어서 결과가 같다. 100만 행에서 약 4.3초 → 2.2초.
-- 같은 id는 에러다. 파일에 같은 id가 있으면 `users.csv data row 3: duplicate id 1`, 새 id가 트리에 이미 있으면 쓰기 전에 `id 5 already exists in users`.
+- 같은 id는 에러다. 파일에 같은 id가 있으면 `users.csv data row 3: duplicate id 1`, 새 id가 트리에 이미 있으면 쓰기 전에 `id 5 already exists in users; new ids are the last row's id + 1, so move the row with the largest id to the end of users.csv`.
 - 다음 id는 Phase 1(B13)과 같다. 처음 필요할 때 파일을 훑어 찾고 기억한다.
 
 ### 대용량 데이터 넣기

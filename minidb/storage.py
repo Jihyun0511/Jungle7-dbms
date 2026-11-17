@@ -265,7 +265,13 @@ class Table:
             return
         for row_id in row_ids:
             if self._index.has_key(row_id):
-                raise SqlError(f"id {row_id} already exists in {self.name}")
+                # 다음 id는 마지막 행 id + 1이라(B13), 손으로 고친 파일에서
+                # 가장 큰 id가 끝에 있지 않으면 계속 같은 id와 부딪힌다
+                raise SqlError(
+                    f"id {row_id} already exists in {self.name}; "
+                    f"new ids are the last row's id + 1, so move the row "
+                    f"with the largest id to the end of {self.path.name}"
+                )
 
     def _check_usable(self) -> None:
         if self._is_broken:
