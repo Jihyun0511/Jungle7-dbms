@@ -13,8 +13,12 @@
       (e13~e15)
 - B23 락 방식 C: insert는 find_next_id~append_rows만 table.lock 안에서 한다.
       파싱과 값 검사는 락 밖
-- B25 엔진 락: tables에서 찾기·열기·넣기를 한 번에 한다. 엔진 락과
+- B25 엔진 락: tables에서 찾기·열기·넣기를 한 번에 한다. close는 엔진 락
+      안에서 tables를 비우고, 락을 놓은 뒤에 테이블을 닫는다. 엔진 락과
       테이블 락은 동시에 쥐지 않는다
+- B24 서버 시작 때 open_all_tables로 data/의 테이블을 전부 열고 트리와
+      다음 id를 미리 만든다. 첫 id 조회가 테이블 락을 쥔 채 파일을 훑지
+      않게 하려는 것. CLI는 부르지 않는다 (insert만 하는 실행이 느려지므로)
 
 담당: (이름)
 """
@@ -26,7 +30,7 @@ from minidb.errors import SqlError
 from minidb.parser import parse_script
 from minidb.schema import Column, Schema
 from minidb.statements import Insert, Name, Select, Statement, Value
-from minidb.storage import Row, Table, open_table
+from minidb.storage import DATA_DIR, Row, Table, open_table
 
 # ---------------------------------------------------------------------------
 # 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
@@ -55,6 +59,16 @@ class Engine:
         self.tables: dict[str, Table] = {}
         self._lock = threading.Lock()
 
+    def open_all_tables(self) -> None:
+        """data/의 테이블을 전부 열고 트리와 다음 id를 만든다 (B24).
+
+        서버가 워커를 띄우기 전에 한 번 부른다. 테이블 하나라도 파일이
+        잘못됐으면 SqlError (서버 시작을 실패시켜 일찍 알린다).
+        """
+        for name in _find_table_names():
+            table = self._get_table(name)
+            table.load_index()
+
     def execute(self, sql: str) -> Result:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
         statements = parse_script(sql)
@@ -80,14 +94,18 @@ class Engine:
 
     def close(self) -> None:
         """열린 테이블을 모두 닫는다 (버퍼 flush 포함)."""
+        with self._lock:
+            tables = list(self.tables.values())
+            self.tables.clear()
+        # 엔진 락을 놓은 뒤에 닫는다. table.close가 테이블 락을 잡으므로
+        # 안에서 닫으면 두 락을 동시에 쥐게 된다 (B25)
         first_error = None
-        for table in self.tables.values():
+        for table in tables:
             try:
                 table.close()
             except SqlError as error:
                 if first_error is None:
                     first_error = error
-        self.tables.clear()
         if first_error is not None:
             raise first_error
 
@@ -104,6 +122,16 @@ class Engine:
 # ---------------------------------------------------------------------------
 # 도우미: 이 파일 안에서만 쓴다. 이름 앞에 _를 붙인다.
 # ---------------------------------------------------------------------------
+
+
+def _find_table_names() -> list[str]:
+    # SQL 이름은 소문자로 바꿔 파일을 찾는다 (B5). 대문자가 든 파일 이름은
+    # 그 이름 그대로는 요청이 오지 않으므로 미리 열지 않는다. 열어 두면
+    # 대소문자를 안 가리는 윈도우에서 같은 파일을 Table 두 개가 잡는다.
+    return sorted(
+        path.stem for path in DATA_DIR.glob("*.csv")
+        if path.stem == path.stem.lower()
+    )
 
 
 def _insert(table: Table, statement: Insert) -> Result:

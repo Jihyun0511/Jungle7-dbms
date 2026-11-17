@@ -12,16 +12,22 @@
       id로 처음 찾을 때만 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고,
       트리가 이미 있을 때만 쓴 행을 바로 등록한다 (s7).
       id로 찾을 때는 그 위치로 가서 행 하나만 읽는다
+- B17 insert 쓰기가 중간에 실패하면 파일을 그 문장 전 길이로 잘라 되돌린다.
+      되돌리지 못하면 테이블을 고장으로 표시하고 이후 읽기·쓰기를 거절한다
 - B23 락 방식 C: 테이블마다 lock 하나. insert 경로(find_next_id, append_rows)는
       호출자가 lock을 쥐고 부른다 (재진입 안 됨). select는 flush·끝 위치·
       offset 찾기만 락 안에서 하고, 파일 읽기와 _decode_row는 락 밖에서 한다.
       파일은 덧붙이기만 하므로 락 안에서 정한 끝 위치까지만 읽으면
-      쓰는 중인 반쪽 행을 보지 않는다
+      쓰는 중인 반쪽 행을 보지 않는다. close도 lock 안에서 해서 insert가
+      버퍼에 쓰는 도중에 파일이 닫히지 않는다
+- B24 load_index로 트리와 다음 id를 서버 시작 때 미리 만든다.
+      Engine.open_all_tables가 부른다
 
 담당: (이름)
 """
 
 import csv
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -57,6 +63,7 @@ class Table:
         self._end_offset = 0
         self._next_id: int | None = None
         self._index: BPlusTree | None = None
+        self._is_broken = False
 
     def read_rows(self) -> list[Row]:
         """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다.
@@ -113,6 +120,16 @@ class Table:
             self._index.insert(row_id, offset)
             offset += len(encoded)
 
+    def load_index(self) -> None:
+        """트리와 다음 id를 지금 만든다 (B24). 이미 있으면 아무것도 안 한다.
+
+        안에서 lock을 잡으므로 lock을 쥔 채로 부르지 않는다. 파일에 같은
+        id가 두 번 있거나 id가 잘못된 행이 있으면 SqlError.
+        """
+        with self.lock:
+            self._flush()
+            self._load_index()
+
     def find_next_id(self) -> int:
         """다음에 쓸 id. append_rows로 쓴 행만큼 늘어난다.
 
@@ -124,15 +141,20 @@ class Table:
         return self._next_id
 
     def close(self) -> None:
-        """버퍼를 flush하고 파일을 닫는다. 여러 번 불러도 된다."""
-        if self._append_file is None:
-            return
-        append_file = self._append_file
-        self._append_file = None
-        try:
-            append_file.close()
-        except OSError as error:
-            raise SqlError(f"cannot close {self.path.name}") from error
+        """버퍼를 flush하고 파일을 닫는다. 여러 번 불러도 된다.
+
+        안에서 lock을 잡으므로 lock을 쥔 채로 부르지 않는다. 쓰는 중인
+        insert가 있으면 그 문장이 끝난 뒤에 닫는다.
+        """
+        with self.lock:
+            if self._append_file is None:
+                return
+            append_file = self._append_file
+            self._append_file = None
+            try:
+                append_file.close()
+            except OSError as error:
+                raise SqlError(f"cannot close {self.path.name}") from error
 
     @property
     def _id_index(self) -> int:
@@ -141,6 +163,7 @@ class Table:
         return id_index
 
     def _flush(self) -> None:
+        self._check_usable()
         if self._append_file is None:
             return
         try:
@@ -236,20 +259,61 @@ class Table:
             if self._index.has_key(row_id):
                 raise SqlError(f"id {row_id} already exists in {self.name}")
 
+    def _check_usable(self) -> None:
+        if self._is_broken:
+            raise SqlError(
+                f"table {self.name} is unusable after a failed write; "
+                f"check {self.path.name} and restart"
+            )
+
     def _write(self, data: bytes) -> int:
-        """data를 파일 끝에 쓰고, data가 시작한 바이트 위치를 돌려준다."""
+        """data를 파일 끝에 쓰고, data가 시작한 바이트 위치를 돌려준다.
+
+        쓰다가 실패하면 파일을 쓰기 전 길이로 되돌리고 SqlError (B17).
+        """
+        self._check_usable()
+        if self._append_file is None:
+            self._open_append()
+        assert self._append_file is not None
+        start = self._end_offset
         try:
-            if self._append_file is None:
-                self._append_file = _open_append_file(self.path)
-                self._end_offset = self._append_file.tell()
             self._append_file.write(data)
+        except OSError as error:
+            self._undo_write(start)
+            raise SqlError(f"cannot write rows to {self.path.name}") from error
+        self._end_offset += len(data)
+        return start
+
+    def _open_append(self) -> None:
+        try:
+            self._append_file = _open_append_file(self.path)
+            self._end_offset = self._append_file.tell()
         except FileNotFoundError as error:
             raise SqlError(f"table {self.name} does not exist") from error
         except OSError as error:
             raise SqlError(f"cannot write rows to {self.path.name}") from error
-        start = self._end_offset
-        self._end_offset += len(data)
-        return start
+
+    def _undo_write(self, start: int) -> None:
+        """실패한 문장이 남긴 앞부분을 잘라 낸다. 못 하면 고장으로 표시한다.
+
+        다음 쓰기 때 append 파일을 다시 열어 끝 위치를 새로 잡는다.
+        """
+        append_file = self._append_file
+        self._append_file = None
+        assert append_file is not None
+        try:
+            append_file.close()
+        except OSError:
+            # 버퍼를 내보내다 또 실패해도 파일 핸들은 닫힌다. 남은 바이트는
+            # 아래에서 크기를 보고 판단하므로 여기서는 넘어간다.
+            pass
+        try:
+            _truncate_file(self.path, start)
+        except OSError as error:
+            self._is_broken = True
+            raise SqlError(
+                f"cannot undo a failed write to {self.path.name}"
+            ) from error
 
 
 def open_table(name: str) -> Table:
@@ -367,6 +431,21 @@ def _encode_row(row: Row, path: Path) -> bytes:
         return text.getvalue().encode(_ENCODING)
     except UnicodeError as error:
         raise SqlError(f"cannot write rows to {path.name}") from error
+
+
+def _truncate_file(path: Path, size: int) -> None:
+    """파일을 size 바이트로 줄인다. 이미 size보다 짧으면 OSError.
+
+    짧다는 것은 앞 문장들이 버퍼에만 있다가 함께 사라졌다는 뜻이라,
+    잘라서 되돌릴 수 없다.
+    """
+    actual_size = path.stat().st_size
+    if actual_size < size:
+        raise OSError(
+            f"{path.name} is {actual_size} bytes but expected at least {size}"
+        )
+    if actual_size > size:
+        os.truncate(path, size)
 
 
 def _open_append_file(path: Path) -> BufferedRandom:
