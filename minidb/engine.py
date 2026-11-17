@@ -11,10 +11,15 @@
 - B21 WHERE 값 타입이 컬럼과 다르면 에러 (e12)
 - Phase 2 WHERE id = ? 는 B+ 트리 인덱스로, 다른 컬럼은 선형 탐색으로 찾는다
       (e13~e15)
+- B23 락 방식 C: insert는 find_next_id~append_rows만 table.lock 안에서 한다.
+      파싱과 값 검사는 락 밖
+- B25 엔진 락: tables에서 찾기·열기·넣기를 한 번에 한다. 엔진 락과
+      테이블 락은 동시에 쥐지 않는다
 
 담당: (이름)
 """
 
+import threading
 from dataclasses import dataclass, field
 
 from minidb.errors import SqlError
@@ -48,6 +53,7 @@ class Engine:
 
     def __init__(self) -> None:
         self.tables: dict[str, Table] = {}
+        self._lock = threading.Lock()
 
     def execute(self, sql: str) -> Result:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
@@ -86,11 +92,13 @@ class Engine:
             raise first_error
 
     def _get_table(self, name: str) -> Table:
-        table = self.tables.get(name)
-        if table is None:
-            table = open_table(name)
-            self.tables[name] = table
-        return table
+        # 찾기와 넣기 사이에 다른 워커가 끼면 같은 테이블을 두 번 연다 (B25)
+        with self._lock:
+            table = self.tables.get(name)
+            if table is None:
+                table = open_table(name)
+                self.tables[name] = table
+            return table
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +116,11 @@ def _insert(table: Table, statement: Insert) -> Result:
 
     id_index = schema.find("id")
     assert id_index is not None
-    next_id = table.find_next_id()
-    for row_id, row in enumerate(rows, start=next_id):
-        row[id_index] = row_id
-    table.append_rows([tuple(row) for row in rows])
+    with table.lock:
+        next_id = table.find_next_id()
+        for row_id, row in enumerate(rows, start=next_id):
+            row[id_index] = row_id
+        table.append_rows([tuple(row) for row in rows])
     return Result(kind="insert", affected=len(rows))
 
 

@@ -12,11 +12,17 @@
       id로 처음 찾을 때만 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고,
       트리가 이미 있을 때만 쓴 행을 바로 등록한다 (s7).
       id로 찾을 때는 그 위치로 가서 행 하나만 읽는다
+- B23 락 방식 C: 테이블마다 lock 하나. insert 경로(find_next_id, append_rows)는
+      호출자가 lock을 쥐고 부른다 (재진입 안 됨). select는 flush·끝 위치·
+      offset 찾기만 락 안에서 하고, 파일 읽기와 _decode_row는 락 밖에서 한다.
+      파일은 덧붙이기만 하므로 락 안에서 정한 끝 위치까지만 읽으면
+      쓰는 중인 반쪽 행을 보지 않는다
 
 담당: (이름)
 """
 
 import csv
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import SEEK_END, BufferedRandom, BufferedReader, StringIO
@@ -36,35 +42,48 @@ Row = tuple[int | str, ...]
 
 
 class Table:
-    """열린 테이블 하나. Engine이 테이블마다 하나씩 들고 있다."""
+    """열린 테이블 하나. Engine이 테이블마다 하나씩 들고 있다.
+
+    lock: 이 테이블의 쓰기 상태(버퍼, 다음 id, 트리)를 지키는 락 (B23).
+    재진입이 안 되므로 쥔 채로 read_rows·find_row_by_id를 부르면 멈춘다.
+    """
 
     def __init__(self, name: str, path: Path, schema: Schema) -> None:
         self.name = name
         self.path = path
         self.schema = schema
+        self.lock = threading.Lock()
         self._append_file: BufferedRandom | None = None
         self._end_offset = 0
         self._next_id: int | None = None
         self._index: BPlusTree | None = None
 
     def read_rows(self) -> list[Row]:
-        """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다."""
-        with _open_records(self.path) as records:
+        """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다.
+
+        안에서 lock을 잡으므로 lock을 쥔 채로 부르지 않는다. 락을 놓은 뒤에
+        들어온 행은 보이지 않는다.
+        """
+        with self.lock:
             self._flush()
-            next(records, None)
-            return [
-                self._decode_row(fields, f"data row {number}")
-                for number, fields in enumerate(records, start=1)
-            ]
+            end_offset = self._read_end_offset()
+        records = _read_records(self.path, end_offset)
+        return [
+            self._decode_row(fields, f"data row {number}")
+            for number, fields in enumerate(records[1:], start=1)
+        ]
 
     def find_row_by_id(self, row_id: int) -> Row | None:
         """B+ 트리로 위치를 찾아 그 행 하나만 읽는다. 없으면 None.
 
         트리가 없으면 이때 파일을 한 번 훑어 만든다. 파일에 같은 id가
-        두 번 있으면 SqlError.
+        두 번 있으면 SqlError. 안에서 lock을 잡으므로 lock을 쥔 채로
+        부르지 않는다.
         """
-        self._flush()
-        offset = self._load_index().find(row_id)
+        with self.lock:
+            self._flush()
+            offset = self._load_index().find(row_id)
+        # offset의 행은 flush가 끝난 바이트라 락 밖에서 읽어도 바뀌지 않는다
         if offset is None:
             return None
         with _open_binary(self.path) as file:
@@ -77,6 +96,7 @@ class Table:
 
         트리가 이미 있으면 쓴 행을 트리에도 등록한다. 그 id가 트리에
         이미 있으면 아무것도 쓰지 않고 SqlError.
+        호출자가 table.lock을 쥐고 부른다 (find_next_id와 한 덩어리).
         """
         if not rows:
             return
@@ -94,7 +114,11 @@ class Table:
             offset += len(encoded)
 
     def find_next_id(self) -> int:
-        """다음에 쓸 id. append_rows로 쓴 행만큼 늘어난다."""
+        """다음에 쓸 id. append_rows로 쓴 행만큼 늘어난다.
+
+        호출자가 table.lock을 쥐고 부른다. 놓았다가 append_rows를 부르면
+        다른 워커가 같은 id를 받을 수 있다.
+        """
         if self._next_id is None:
             self._next_id = self._read_next_id()
         return self._next_id
@@ -123,6 +147,19 @@ class Table:
             self._append_file.flush()
         except OSError as error:
             raise SqlError(f"cannot write rows to {self.path.name}") from error
+
+    def _read_end_offset(self) -> int:
+        """지금까지 쓴 데이터가 끝나는 바이트 위치. lock 안에서 flush 뒤에 부른다."""
+        # _end_offset은 _write가 append 파일을 처음 열 때 정해진다.
+        # 그 전에는 0이지만 파일에는 행이 있으므로 파일 크기를 쓴다.
+        if self._append_file is not None:
+            return self._end_offset
+        try:
+            return self.path.stat().st_size
+        except FileNotFoundError as error:
+            raise SqlError(f"table {self.name} does not exist") from error
+        except OSError as error:
+            raise SqlError(f"cannot read {self.path.name}") from error
 
     def _decode_row(self, fields: list[str], where: str) -> Row:
         location = f"{self.path.name} {where}"
@@ -163,9 +200,8 @@ class Table:
             return self._index
         index = BPlusTree()
         last_id = None
-        for number, (offset, record) in enumerate(
-            _scan_records(self.path), start=1,
-        ):
+        records = _scan_records(self.path, self._read_end_offset())
+        for number, (offset, record) in enumerate(records, start=1):
             last_id = self._read_row_id(record, number)
             self._register_id(index, last_id, offset, number)
         self._index = index
@@ -258,6 +294,20 @@ def _open_binary(path: Path) -> Iterator[BufferedReader]:
         raise SqlError(f"cannot read {path.name}") from error
 
 
+def _read_records(path: Path, end_offset: int) -> list[list[str]]:
+    """헤더를 포함한 행들. end_offset 바이트까지만 읽는다 (B23).
+
+    그 뒤는 다른 워커가 쓰는 중일 수 있어 반쪽 행이 섞인다.
+    """
+    with _open_binary(path) as file:
+        data = file.read(end_offset)
+    try:
+        text = data.decode(_ENCODING)
+        return list(csv.reader(StringIO(text, newline=""), strict=True))
+    except (UnicodeError, csv.Error) as error:
+        raise SqlError(f"cannot read {path.name}") from error
+
+
 def _parse_record(record: bytes, path: Path) -> list[str]:
     try:
         text = record.decode(_ENCODING)
@@ -279,11 +329,16 @@ def _read_record(file: BufferedReader) -> bytes:
     return record
 
 
-def _scan_records(path: Path) -> Iterator[tuple[int, bytes]]:
-    """헤더를 뺀 행마다 (시작 바이트 위치, 행의 바이트)."""
+def _scan_records(
+    path: Path, end_offset: int,
+) -> Iterator[tuple[int, bytes]]:
+    """헤더를 뺀 행마다 (시작 바이트 위치, 행의 바이트).
+
+    end_offset에서 멈춘다. 그 뒤는 끝 위치를 정한 뒤에 들어온 행이다 (B23).
+    """
     with _open_binary(path) as file:
         _read_record(file)
-        while True:
+        while file.tell() < end_offset:
             offset = file.tell()
             record = _read_record(file)
             if not record:
