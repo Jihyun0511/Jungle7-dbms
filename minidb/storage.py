@@ -12,6 +12,8 @@
       id로 처음 찾을 때만 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고,
       트리가 이미 있을 때만 쓴 행을 바로 등록한다 (s7).
       id로 찾을 때는 그 위치로 가서 행 하나만 읽는다
+- B23 읽을 끝 위치와 인덱스 조회는 락 안에서, 행 읽기는 락 밖에서 한다.
+- B24 서버 시작 시 인덱스와 다음 id를 미리 준비한다.
 
 담당: (이름)
 """
@@ -19,8 +21,16 @@
 import csv
 from collections.abc import Iterator
 from contextlib import contextmanager
-from io import SEEK_END, BufferedRandom, BufferedReader, StringIO
+from io import (
+    SEEK_END,
+    BufferedRandom,
+    BufferedReader,
+    RawIOBase,
+    StringIO,
+    TextIOWrapper,
+)
 from pathlib import Path
+from threading import Lock
 
 from minidb.bptree import BPlusTree
 from minidb.errors import SqlError
@@ -42,15 +52,18 @@ class Table:
         self.name = name
         self.path = path
         self.schema = schema
+        self.lock = Lock()
         self._append_file: BufferedRandom | None = None
         self._end_offset = 0
         self._next_id: int | None = None
         self._index: BPlusTree | None = None
 
     def read_rows(self) -> list[Row]:
-        """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다."""
-        with _open_records(self.path) as records:
+        """버퍼를 비운 시점의 CSV 범위만 읽는다."""
+        with self.lock:
             self._flush()
+            end_offset = self._find_file_end()
+        with _open_records(self.path, end_offset) as records:
             next(records, None)
             return [
                 self._decode_row(fields, f"data row {number}")
@@ -63,14 +76,23 @@ class Table:
         트리가 없으면 이때 파일을 한 번 훑어 만든다. 파일에 같은 id가
         두 번 있으면 SqlError.
         """
-        self._flush()
-        offset = self._load_index().find(row_id)
+        with self.lock:
+            self._flush()
+            end_offset = self._find_file_end()
+            offset = self._load_index(end_offset).find(row_id)
         if offset is None:
             return None
         with _open_binary(self.path) as file:
             file.seek(offset)
-            fields = _parse_record(_read_record(file), self.path)
+            record = _read_record(file, end_offset - offset)
+            fields = _parse_record(record, self.path)
         return self._decode_row(fields, f"row with id {row_id}")
+
+    def prepare_index(self) -> None:
+        """서버가 요청을 받기 전에 인덱스와 다음 id를 준비한다 (B24)."""
+        with self.lock:
+            self._flush()
+            self._load_index(self._find_file_end())
 
     def append_rows(self, rows: list[Row]) -> None:
         """검사가 끝난 행(id 포함, 스키마 순서)을 버퍼에 쓴다.
@@ -124,6 +146,14 @@ class Table:
         except OSError as error:
             raise SqlError(f"cannot write rows to {self.path.name}") from error
 
+    def _find_file_end(self) -> int:
+        try:
+            return self.path.stat().st_size
+        except FileNotFoundError as error:
+            raise SqlError(f"table {self.name} does not exist") from error
+        except OSError as error:
+            raise SqlError(f"cannot read {self.path.name}") from error
+
     def _decode_row(self, fields: list[str], where: str) -> Row:
         location = f"{self.path.name} {where}"
         if len(fields) != len(self.schema.columns):
@@ -157,14 +187,14 @@ class Table:
                 f"{self.path.name} last row has an invalid id"
             ) from error
 
-    def _load_index(self) -> BPlusTree:
+    def _load_index(self, end_offset: int) -> BPlusTree:
         """처음 한 번 파일을 훑어 id → 바이트 위치 트리를 만든다."""
         if self._index is not None:
             return self._index
         index = BPlusTree()
         last_id = None
         for number, (offset, record) in enumerate(
-            _scan_records(self.path), start=1,
+            _scan_records(self.path, end_offset), start=1,
         ):
             last_id = self._read_row_id(record, number)
             self._register_id(index, last_id, offset, number)
@@ -235,11 +265,41 @@ _ENCODING = "utf-8"
 _QUOTE = ord('"')
 
 
+class _LimitedReader(RawIOBase):
+    """CSV 디코더가 조회 시작 시점 이후에 추가된 바이트를 읽지 않게 한다."""
+
+    def __init__(self, file: BufferedReader, limit: int) -> None:
+        self._file = file
+        self._remaining = limit
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: bytearray | memoryview) -> int:
+        if not self._remaining:
+            return 0
+        read = self._file.readinto(memoryview(buffer)[:self._remaining])
+        self._remaining -= read
+        return read
+
+
 @contextmanager
-def _open_records(path: Path) -> Iterator[Iterator[list[str]]]:
+def _open_records(
+    path: Path, end_offset: int | None = None,
+) -> Iterator[Iterator[list[str]]]:
     try:
-        with path.open(encoding=_ENCODING, newline="") as file:
-            yield csv.reader(file, strict=True)
+        if end_offset is None:
+            with path.open(encoding=_ENCODING, newline="") as file:
+                yield csv.reader(file, strict=True)
+            return
+        with (
+            path.open("rb") as file,
+            TextIOWrapper(
+                BufferedReader(_LimitedReader(file, end_offset)),
+                encoding=_ENCODING, newline="",
+            ) as text,
+        ):
+            yield csv.reader(text, strict=True)
     except FileNotFoundError as error:
         raise SqlError(f"table {path.stem} does not exist") from error
     except (OSError, UnicodeError, csv.Error) as error:
@@ -266,12 +326,14 @@ def _parse_record(record: bytes, path: Path) -> list[str]:
         raise SqlError(f"cannot read {path.name}") from error
 
 
-def _read_record(file: BufferedReader) -> bytes:
+def _read_record(file: BufferedReader, limit: int) -> bytes:
     """CSV 행 하나의 바이트. 따옴표 안의 줄바꿈이면 다음 줄까지 붙인다."""
-    record = file.readline()
+    if limit <= 0:
+        return b""
+    record = file.readline(limit)
     quotes = record.count(_QUOTE)
-    while quotes % 2 == 1:
-        line = file.readline()
+    while quotes % 2 == 1 and len(record) < limit:
+        line = file.readline(limit - len(record))
         if not line:
             break
         record += line
@@ -279,13 +341,12 @@ def _read_record(file: BufferedReader) -> bytes:
     return record
 
 
-def _scan_records(path: Path) -> Iterator[tuple[int, bytes]]:
+def _scan_records(path: Path, end_offset: int) -> Iterator[tuple[int, bytes]]:
     """헤더를 뺀 행마다 (시작 바이트 위치, 행의 바이트)."""
     with _open_binary(path) as file:
-        _read_record(file)
-        while True:
-            offset = file.tell()
-            record = _read_record(file)
+        _read_record(file, end_offset)
+        while (offset := file.tell()) < end_offset:
+            record = _read_record(file, end_offset - offset)
             if not record:
                 return
             yield offset, record

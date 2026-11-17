@@ -11,17 +11,20 @@
 - B21 WHERE 값 타입이 컬럼과 다르면 에러 (e12)
 - Phase 2 WHERE id = ? 는 B+ 트리 인덱스로, 다른 컬럼은 선형 탐색으로 찾는다
       (e13~e15)
+- B23 INSERT의 id 결정부터 저장까지 같은 테이블 락으로 보호한다.
+- B25 열린 테이블 목록을 엔진 락으로 보호한다.
 
 담당: (이름)
 """
 
 from dataclasses import dataclass, field
+from threading import Lock
 
 from minidb.errors import SqlError
 from minidb.parser import parse_script
 from minidb.schema import Column, Schema
 from minidb.statements import Insert, Name, Select, Statement, Value
-from minidb.storage import Row, Table, open_table
+from minidb.storage import DATA_DIR, Row, Table, open_table
 
 # ---------------------------------------------------------------------------
 # 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
@@ -48,6 +51,13 @@ class Engine:
 
     def __init__(self) -> None:
         self.tables: dict[str, Table] = {}
+        self.engine_lock = Lock()
+
+    def prepare_tables(self) -> None:
+        """워커 시작 전에 기존 테이블의 인덱스와 다음 id를 준비한다 (B24)."""
+        for path in sorted(DATA_DIR.glob("*.csv")):
+            if path.is_file():
+                self._get_table(path.stem).prepare_index()
 
     def execute(self, sql: str) -> Result:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
@@ -86,11 +96,12 @@ class Engine:
             raise first_error
 
     def _get_table(self, name: str) -> Table:
-        table = self.tables.get(name)
-        if table is None:
-            table = open_table(name)
-            self.tables[name] = table
-        return table
+        with self.engine_lock:
+            table = self.tables.get(name)
+            if table is None:
+                table = open_table(name)
+                self.tables[name] = table
+            return table
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +119,11 @@ def _insert(table: Table, statement: Insert) -> Result:
 
     id_index = schema.find("id")
     assert id_index is not None
-    next_id = table.find_next_id()
-    for row_id, row in enumerate(rows, start=next_id):
-        row[id_index] = row_id
-    table.append_rows([tuple(row) for row in rows])
+    with table.lock:
+        next_id = table.find_next_id()
+        for row_id, row in enumerate(rows, start=next_id):
+            row[id_index] = row_id
+        table.append_rows([tuple(row) for row in rows])
     return Result(kind="insert", affected=len(rows))
 
 
