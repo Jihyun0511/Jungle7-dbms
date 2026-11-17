@@ -215,3 +215,41 @@ def test_s12_invalid_id_is_error_on_both_paths(workspace):
         write_table(workspace, "items", "name:str,age:int,id:int\n" + line)
         with pytest.raises(SqlError, match="data row 1 has an invalid id"):
             open_table("items").find_row_by_id(1)
+
+
+def test_s13_failed_write_is_undone(workspace, monkeypatch):
+    """B17: 쓰다가 OSError가 나면 그 문장 전 길이로 되돌리고, 다음 쓰기는 정상"""
+    original = USERS_HEADER + "1,yena,24\n"
+    write_table(workspace, "users", original)
+    real_open = minidb.storage._open_append_file
+
+    class HalfWrittenFile:
+        """앞 절반만 디스크에 쓰고 실패하는 파일 (디스크가 꽉 찬 상황)."""
+
+        def __init__(self, file):
+            self._file = file
+
+        def write(self, data):
+            self._file.write(data[: len(data) // 2])
+            self._file.flush()
+            raise OSError("disk full")
+
+        def __getattr__(self, name):
+            return getattr(self._file, name)
+
+    monkeypatch.setattr(
+        minidb.storage, "_open_append_file",
+        lambda path: HalfWrittenFile(real_open(path)),
+    )
+    table = open_table("users")
+    try:
+        with pytest.raises(SqlError, match="cannot write rows to users.csv"):
+            table.append_rows([(2, "kim", 20), (3, "park", 30)])
+        assert read_table(workspace, "users") == original
+
+        monkeypatch.setattr(minidb.storage, "_open_append_file", real_open)
+        assert table.find_next_id() == 2
+        table.append_rows([(2, "kim", 20)])
+        assert table.read_rows() == [(1, "yena", 24), (2, "kim", 20)]
+    finally:
+        table.close()

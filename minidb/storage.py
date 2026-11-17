@@ -31,7 +31,14 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from io import SEEK_END, BufferedRandom, BufferedReader, StringIO
+from io import (
+    SEEK_END,
+    BufferedRandom,
+    BufferedReader,
+    RawIOBase,
+    StringIO,
+    TextIOWrapper,
+)
 from pathlib import Path
 
 from minidb.bptree import BPlusTree
@@ -74,11 +81,12 @@ class Table:
         with self.lock:
             self._flush()
             end_offset = self._read_end_offset()
-        records = _read_records(self.path, end_offset)
-        return [
-            self._decode_row(fields, f"data row {number}")
-            for number, fields in enumerate(records[1:], start=1)
-        ]
+        with _open_records_until(self.path, end_offset) as records:
+            next(records, None)
+            return [
+                self._decode_row(fields, f"data row {number}")
+                for number, fields in enumerate(records, start=1)
+            ]
 
     def find_row_by_id(self, row_id: int) -> Row | None:
         """B+ 트리로 위치를 찾아 그 행 하나만 읽는다. 없으면 None.
@@ -358,17 +366,48 @@ def _open_binary(path: Path) -> Iterator[BufferedReader]:
         raise SqlError(f"cannot read {path.name}") from error
 
 
-def _read_records(path: Path, end_offset: int) -> list[list[str]]:
+class _LimitedReader(RawIOBase):
+    """file에서 limit 바이트까지만 읽게 한다 (도현 #11).
+
+    파일 전체를 메모리에 올리지 않고 csv가 한 줄씩 읽게 하려는 것이다.
+    """
+
+    def __init__(self, file: BufferedReader, limit: int) -> None:
+        self._file = file
+        self._remaining = limit
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: bytearray | memoryview) -> int:
+        if not self._remaining:
+            return 0
+        read = self._file.readinto(memoryview(buffer)[:self._remaining])
+        self._remaining -= read
+        return read
+
+
+@contextmanager
+def _open_records_until(
+    path: Path, end_offset: int,
+) -> Iterator[Iterator[list[str]]]:
     """헤더를 포함한 행들. end_offset 바이트까지만 읽는다 (B23).
 
-    그 뒤는 다른 워커가 쓰는 중일 수 있어 반쪽 행이 섞인다.
+    그 뒤는 다른 워커가 쓰는 중일 수 있어 반쪽 행이 섞인다. 행을 다 읽을
+    때까지 with 안에 있어야 한다 (csv가 파일을 한 줄씩 읽는다).
     """
-    with _open_binary(path) as file:
-        data = file.read(end_offset)
     try:
-        text = data.decode(_ENCODING)
-        return list(csv.reader(StringIO(text, newline=""), strict=True))
-    except (UnicodeError, csv.Error) as error:
+        with (
+            path.open("rb") as file,
+            TextIOWrapper(
+                BufferedReader(_LimitedReader(file, end_offset)),
+                encoding=_ENCODING, newline="",
+            ) as text,
+        ):
+            yield csv.reader(text, strict=True)
+    except FileNotFoundError as error:
+        raise SqlError(f"table {path.stem} does not exist") from error
+    except (OSError, UnicodeError, csv.Error) as error:
         raise SqlError(f"cannot read {path.name}") from error
 
 

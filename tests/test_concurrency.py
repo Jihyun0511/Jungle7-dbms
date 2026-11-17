@@ -128,6 +128,28 @@ def test_t3_first_requests_open_table_once(engine, monkeypatch):
     assert opened.count("users") <= 1  # 서버 시작 때 미리 열었으면 0
 
 
+def test_t3b_prepared_tables_are_not_opened_again(engine, monkeypatch):
+    """B24: open_all_tables로 미리 열면 요청 중에는 0번 연다 (지현 #13)"""
+    engine.open_all_tables()
+    opened = []
+    real_open = minidb.engine.open_table
+
+    def counting_open(name):
+        opened.append(name)
+        return real_open(name)
+
+    monkeypatch.setattr(minidb.engine, "open_table", counting_open)
+
+    def request(number):
+        def body():
+            engine.execute(f"INSERT INTO users VALUES ('t{number}', {number});")
+        return body
+
+    assert run_threads([request(number) for number in range(THREADS)]) == []
+    assert opened == []
+    assert len(engine.execute("SELECT * FROM users;").rows) == THREADS
+
+
 def test_t4_select_sees_whole_statements_only(engine):
     batch = 50
     statements = 40
