@@ -186,9 +186,9 @@ def test_e15_other_column_still_scans(engine, monkeypatch):
     scans = []
     original = table.read_rows
 
-    def count_scan():
+    def count_scan(*args):
         scans.append(1)
-        return original()
+        return original(*args)
 
     monkeypatch.setattr(table, "read_rows", count_scan)
     assert engine.execute("SELECT id FROM users WHERE age = 24;").rows == [

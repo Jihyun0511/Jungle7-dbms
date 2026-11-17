@@ -11,17 +11,28 @@
 - B21 WHERE 값 타입이 컬럼과 다르면 에러 (e12)
 - Phase 2 WHERE id = ? 는 B+ 트리 인덱스로, 다른 컬럼은 선형 탐색으로 찾는다
       (e13~e15)
+- Phase 3 여러 스레드가 Engine 하나를 같이 쓴다 (노션 6절 B23~B27, t1~t5)
+      B25 테이블 찾기·열기는 엔진 락으로 짧게. 놓은 뒤에 테이블 락을 잡는다
+          (두 락을 동시에 쥐지 않는다)
+      B23 C insert: 파싱·값 검사는 락 밖, find_next_id → id 채우기 →
+          append_rows만 테이블 락 안
+          select: 락 안에서는 flush + 끝 위치 기억(또는 트리에서 offset 찾기)만,
+          파일 읽기·디코딩·결과 만들기는 락 밖
+      B24 prepare_tables(): 서버 시작 때 data/의 테이블을 모두 열고 트리·다음 id를
+          미리 만든다
+      B27 close()는 워커를 모두 멈춘 뒤에 부른다 (부르는 쪽 책임)
 
 담당: (이름)
 """
 
+import threading
 from dataclasses import dataclass, field
 
 from minidb.errors import SqlError
 from minidb.parser import parse_script
 from minidb.schema import Column, Schema
 from minidb.statements import Insert, Name, Select, Statement, Value
-from minidb.storage import Row, Table, open_table
+from minidb.storage import DATA_DIR, Row, Table, open_table
 
 # ---------------------------------------------------------------------------
 # 공개: 다른 모듈이 가져다 쓴다. 모양을 바꾸려면 팀과 먼저 정한다.
@@ -48,6 +59,7 @@ class Engine:
 
     def __init__(self) -> None:
         self.tables: dict[str, Table] = {}
+        self._engine_lock = threading.Lock()   # self.tables만 지킨다 (B25)
 
     def execute(self, sql: str) -> Result:
         """SQL 문장이 정확히 하나면 실행하고, 그 외에는 SqlError를 던진다."""
@@ -72,25 +84,45 @@ class Engine:
                 error.position = statement.table.position
             raise
 
+    def prepare_tables(self) -> list[str]:
+        """data/의 테이블을 모두 열고 트리·다음 id를 미리 만든다 (B24).
+
+        서버 시작 때 워커를 띄우기 전에 부른다. 연 테이블 이름을 돌려준다.
+        테이블 파일이 잘못돼 있으면 SqlError.
+        """
+        names = sorted(path.stem for path in DATA_DIR.glob("*.csv"))
+        for name in names:
+            table = self._get_table(name)
+            with table.lock:
+                table.prepare()
+        return names
+
     def close(self) -> None:
-        """열린 테이블을 모두 닫는다 (버퍼 flush 포함)."""
+        """열린 테이블을 모두 닫는다 (버퍼 flush 포함).
+
+        여러 스레드에서 쓸 때는 워커를 모두 멈춘 뒤에 부른다 (B27).
+        """
+        with self._engine_lock:
+            tables = list(self.tables.values())
+            self.tables.clear()
         first_error = None
-        for table in self.tables.values():
+        for table in tables:
             try:
                 table.close()
             except SqlError as error:
                 if first_error is None:
                     first_error = error
-        self.tables.clear()
         if first_error is not None:
             raise first_error
 
     def _get_table(self, name: str) -> Table:
-        table = self.tables.get(name)
-        if table is None:
-            table = open_table(name)
-            self.tables[name] = table
-        return table
+        # 두 워커가 동시에 "없네" 하면 Table이 두 개, 락도 두 개가 된다 (B25)
+        with self._engine_lock:
+            table = self.tables.get(name)
+            if table is None:
+                table = open_table(name)
+                self.tables[name] = table
+            return table
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +140,12 @@ def _insert(table: Table, statement: Insert) -> Result:
 
     id_index = schema.find("id")
     assert id_index is not None
-    next_id = table.find_next_id()
-    for row_id, row in enumerate(rows, start=next_id):
-        row[id_index] = row_id
-    table.append_rows([tuple(row) for row in rows])
+    # 다음 id 읽기부터 쓰기까지 한 덩어리여야 id가 겹치지 않는다 (B23, t2)
+    with table.lock:
+        next_id = table.find_next_id()
+        for row_id, row in enumerate(rows, start=next_id):
+            row[id_index] = row_id
+        table.append_rows([tuple(row) for row in rows])
     return Result(kind="insert", affected=len(rows))
 
 
@@ -194,13 +228,24 @@ def _select(table: Table, statement: Select) -> Result:
 def _find_rows(
     table: Table, where_index: int | None, where_value: int | str | None,
 ) -> list[Row]:
-    if where_index is None:
-        return table.read_rows()
-    if table.schema.columns[where_index].name == "id":
+    """락은 위치를 정하는 동안만 쥐고, 읽기·디코딩은 락 밖에서 한다 (B23 C)."""
+    if where_index is not None and table.schema.columns[where_index].name == "id":
         assert isinstance(where_value, int)
-        row = table.find_row_by_id(where_value)
-        return [] if row is None else [row]
-    return [row for row in table.read_rows() if row[where_index] == where_value]
+        return _find_row_by_id(table, where_value)
+    with table.lock:
+        end = table.snapshot_end()
+    rows = table.read_rows(end)
+    if where_index is None:
+        return rows
+    return [row for row in rows if row[where_index] == where_value]
+
+
+def _find_row_by_id(table: Table, row_id: int) -> list[Row]:
+    with table.lock:
+        offset = table.find_offset(row_id)
+    if offset is None:
+        return []
+    return [table.read_row_at(offset, row_id)]
 
 
 def _find_column(schema: Schema, name: Name) -> int:

@@ -12,11 +12,17 @@
       id로 처음 찾을 때만 파일을 한 번 훑어 만든다. INSERT는 트리를 만들지 않고,
       트리가 이미 있을 때만 쓴 행을 바로 등록한다 (s7).
       id로 찾을 때는 그 위치로 가서 행 하나만 읽는다
+- Phase 3 B23 C: Table.lock은 Engine이 잡는다. Table 메서드는 락을 잡지 않는다.
+      락 안에서 부를 것: find_next_id, append_rows, snapshot_end, find_offset, prepare
+      락 밖에서 불러도 되는 것: read_rows(end), read_row_at (파일은 덧붙이기만 하므로
+      락 안에서 받은 끝 위치·offset까지의 바이트는 바뀌지 않는다)
+- Phase 3 B24 prepare(): 서버 시작 때 트리와 다음 id를 미리 만든다
 
 담당: (이름)
 """
 
 import csv
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import SEEK_END, BufferedRandom, BufferedReader, StringIO
@@ -46,31 +52,67 @@ class Table:
         self._end_offset = 0
         self._next_id: int | None = None
         self._index: BPlusTree | None = None
+        # 다음 id, 트리, 쓰기 파일을 지킨다. 잡는 쪽은 Engine (B23)
+        self.lock = threading.Lock()
 
-    def read_rows(self) -> list[Row]:
-        """읽기 전에 쓰기 버퍼를 비우고, 행을 스키마 타입으로 바꾼다."""
-        with _open_records(self.path) as records:
-            self._flush()
-            next(records, None)
-            return [
-                self._decode_row(fields, f"data row {number}")
-                for number, fields in enumerate(records, start=1)
-            ]
+    def read_rows(self, end: int | None = None) -> list[Row]:
+        """행을 스키마 타입으로 바꾼다. end 바이트 위치까지만 읽는다 (B23).
+
+        end가 None이면 쓰기 버퍼를 비우고 파일 끝까지 읽는다 (스레드 하나일
+        때). 여러 스레드에서는 락 안에서 snapshot_end()로 받은 값을 넘긴다.
+        """
+        if end is None:
+            end = self.snapshot_end()
+        records = _parse_records(self._read_bytes(end), self.path)
+        return [
+            self._decode_row(fields, f"data row {number}")
+            for number, fields in enumerate(records[1:], start=1)
+        ]
+
+    def snapshot_end(self) -> int:
+        """쓰기 버퍼를 비운 뒤의 파일 끝 바이트 위치. 락 안에서 부른다."""
+        self._flush()
+        try:
+            return self.path.stat().st_size
+        except FileNotFoundError as error:
+            raise SqlError(f"table {self.name} does not exist") from error
+        except OSError as error:
+            raise SqlError(f"cannot read {self.path.name}") from error
 
     def find_row_by_id(self, row_id: int) -> Row | None:
         """B+ 트리로 위치를 찾아 그 행 하나만 읽는다. 없으면 None.
 
-        트리가 없으면 이때 파일을 한 번 훑어 만든다. 파일에 같은 id가
-        두 번 있으면 SqlError.
+        스레드 하나일 때 쓰는 줄임. 여러 스레드에서는 find_offset(락 안)과
+        read_row_at(락 밖)으로 나눠 부른다 (B23).
         """
-        self._flush()
-        offset = self._load_index().find(row_id)
+        offset = self.find_offset(row_id)
         if offset is None:
             return None
+        return self.read_row_at(offset, row_id)
+
+    def find_offset(self, row_id: int) -> int | None:
+        """id인 행이 시작하는 바이트 위치. 없으면 None. 락 안에서 부른다.
+
+        트리가 없으면 이때 파일을 한 번 훑어 만든다 (B24로 미리 만들 수 있음).
+        파일에 같은 id가 두 번 있으면 SqlError.
+        """
+        self._flush()
+        return self._load_index().find(row_id)
+
+    def read_row_at(self, offset: int, row_id: int) -> Row:
+        """offset에서 시작하는 행 하나. 락 밖에서 불러도 된다."""
         with _open_binary(self.path) as file:
             file.seek(offset)
             fields = _parse_record(_read_record(file), self.path)
         return self._decode_row(fields, f"row with id {row_id}")
+
+    def prepare(self) -> None:
+        """트리와 다음 id를 미리 만든다 (B24). 락 안에서 부른다.
+
+        안 하면 첫 WHERE id가 테이블 락을 쥔 채 파일 전체를 훑는다.
+        """
+        self._flush()
+        self._load_index()
 
     def append_rows(self, rows: list[Row]) -> None:
         """검사가 끝난 행(id 포함, 스키마 순서)을 버퍼에 쓴다.
@@ -123,6 +165,11 @@ class Table:
             self._append_file.flush()
         except OSError as error:
             raise SqlError(f"cannot write rows to {self.path.name}") from error
+
+    def _read_bytes(self, end: int) -> bytes:
+        """파일 처음부터 end 바이트까지. 그 뒤에 덧붙는 행은 보지 않는다."""
+        with _open_binary(self.path) as file:
+            return file.read(end)
 
     def _decode_row(self, fields: list[str], where: str) -> Row:
         location = f"{self.path.name} {where}"
@@ -255,6 +302,15 @@ def _open_binary(path: Path) -> Iterator[BufferedReader]:
     except FileNotFoundError as error:
         raise SqlError(f"table {path.stem} does not exist") from error
     except OSError as error:
+        raise SqlError(f"cannot read {path.name}") from error
+
+
+def _parse_records(data: bytes, path: Path) -> list[list[str]]:
+    """바이트 덩어리를 CSV 행들로 (헤더 포함). 깨진 내용이면 SqlError."""
+    try:
+        text = data.decode(_ENCODING)
+        return list(csv.reader(StringIO(text, newline=""), strict=True))
+    except (UnicodeError, csv.Error) as error:
         raise SqlError(f"cannot read {path.name}") from error
 
 
